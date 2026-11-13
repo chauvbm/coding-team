@@ -1,4 +1,4 @@
-# coding-team đa nền tảng và phân luồng Superpowers — Kế hoạch triển khai (bản 2)
+# coding-team đa nền tảng và phân luồng Superpowers — Kế hoạch triển khai (bản 3)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -24,10 +24,23 @@
 
 - **Nhánh làm việc:** `feat/multi-platform`, tạo từ `main`. Controller tạo nhánh trước Task 1. Mỗi lần implementer kết thúc một task, `HEAD` phải ở trên nhánh này.
 - **Implementer:** làm TDD (RED → GREEN → refactor), **chỉ commit cục bộ**, không bao giờ push.
-- **Controller:**
-  - Chỉ push (`git push origin feat/multi-platform`) khi task review đã đạt.
-  - Với các task checkpoint (Task 4, 8, 11), chỉ push sau khi bộ test tích hợp của checkpoint đạt.
-  - Task chưa được push thì chưa được tính là xong.
+- **Hai mức hoàn thành:**
+  - **Task hoàn thành kỹ thuật:** TDD xong, có commit cục bộ, review độc lập đạt (mọi phát hiện Critical/Important đã được sửa).
+  - **Phần hoàn thành:** mọi task của phần đều đã hoàn thành kỹ thuật, bộ test tích hợp hoặc kiểm tra của phần đạt, Controller đã push nhánh và CI xanh đúng commit vừa push.
+- **Các phần** (mỗi phần là một lần push, đúng yêu cầu "xong phần nào push phần đó"):
+
+  | Phần | Task | Mốc push |
+  |---|---|---|
+  | A — Nền tảng | 1–4 | Sau checkpoint A (Task 4) |
+  | B — Chính sách và cài đặt | 5–8 | Sau checkpoint B (Task 8) |
+  | C — Điều phối và CLI | 9–11 | Sau checkpoint C (Task 11) |
+  | D — Tài liệu và kiểm chứng | 12–14 | Sau Task 14 (toàn bộ test đạt) |
+  | E — Phát hành | 15 | Push kết quả smoke, rồi merge vào `main` |
+- **Controller push:** `git push origin feat/multi-platform`, sau đó kiểm tra CI đúng commit: `gh run list --branch feat/multi-platform --commit $(git rev-parse HEAD) --json status,conclusion,headSha`, kỳ vọng `completed` / `success`. CI đỏ thì phần đó chưa hoàn thành.
+- **Mức reviewer theo rủi ro:**
+  - Reviewer tầng `strong` cho Task 3 (quyền agent), 7 (trình cài đặt), 9 (ownership), 10 (CLI) và các checkpoint 4, 8, 11.
+  - Các task tài liệu, fixture hoặc đóng gói (12, 13, 14) có thể dùng tầng `standard`, khi mọi kiểm tra xác định đã đạt.
+  - Không bỏ review độc lập ở task nào.
 - **Không chạy song song nhiều implementer.** Thứ tự task là bắt buộc, vì các task sau dùng interface của task trước.
 - **Merge vào `main` chỉ ở Task 15**, sau khi đủ ba điều kiện:
   1. final review toàn nhánh đạt;
@@ -54,7 +67,8 @@
 - Không ghi qua symlink, junction hay reparse point, ở cả đích lẫn mọi thư mục tổ tiên nằm dưới root được quản lý.
 - **Mức bảo đảm:**
   - Chỉ ghi `ENFORCED` khi có cơ chế runtime tương ứng.
-  - Vai trò có shell, `browser_testing`, hoặc MCP không nằm trong danh sách MCP chỉ-đọc: `no_file_write` và `no_delegate` đều không bao giờ là `ENFORCED`.
+  - Vai trò có shell, có `browser_testing`, được cấp **bất kỳ** công cụ MCP nào, hoặc kế thừa MCP: `no_file_write` và `no_delegate` đều không bao giờ là `ENFORCED`. Không suy ra quyền của MCP từ tên công cụ.
+  - Một giá trị model hợp lệ trong file cấu hình không có nghĩa là tài khoản dùng được model đó. `verified_on` chỉ là ngày đối chiếu tài liệu.
   - `write:assigned` và `write:tests` luôn là `ADVISORY`.
 - ID vai trò: `ct-architect`, `ct-researcher`, `ct-developer`, `ct-test-engineer`, `ct-reviewer`, `ct-security`. Biến thể thêm: `ct-reviewer-verify`.
 - Tầng model: `inherit`, `strong`, `standard`, `light`. Nền tảng: `claude-code`, `codex`, `antigravity`.
@@ -85,16 +99,29 @@
    - Đây **không phải** bằng chứng có tiến trình SDD đang chạy.
    - Kết quả: HOLD để người dùng xác định tiếp tục hay bàn giao.
 9. **Bàn giao:**
-   - `from` phải khớp owner hiện tại của task, nếu đã có record.
+   - Task đã có record: người bàn giao phải xuất trình `owner_token` hiện tại (hoặc khớp `owner_session_id` tin cậy).
+   - Task chưa có record (ví dụ bàn giao từ SDD, vốn không ghi record): bắt buộc `user_confirmed: true`. Kết quả ghi `from_verified: false`.
    - Bằng chứng worker đã dừng là **do caller khai báo**: kết quả ghi `termination_evidence: "caller-asserted"`, và tài liệu yêu cầu Leader kiểm tra bằng công cụ runtime trước khi ghi.
 10. **Phân luồng tất định:**
     - `ct_orchestration.route(facts)` thực thi bảng §6.2 trên các fact đã phân loại. Model vẫn là bên phân loại fact, nên phân luồng nói chung vẫn ADVISORY.
     - Trường hợp không khớp điều kiện nào: L2 → `coding-team`, L0/L1 → `leader-direct`.
 11. **`docs_lookup`:**
     - Claude Code: dùng `WebFetch`, `WebSearch`, cộng các công cụ MCP do người dùng truyền qua `install --docs-mcp NAME` (lặp lại được).
-    - MCP khớp `read_only_mcp_patterns` (Context7) thì giữ được `ENFORCED`; MCP khác hạ xuống `ADVISORY`.
+    - Cấp bất kỳ công cụ MCP nào đều hạ `no_file_write` và `no_delegate` của vai trò đó xuống `ADVISORY`, kể cả Context7, vì tên công cụ không chứng minh được hành vi của server. Không dùng danh sách MCP chỉ-đọc theo tên.
+    - Không có `--docs-mcp` thì `ct-researcher` vẫn giữ `ENFORCED`.
     - Antigravity `ct-researcher` để `inheritMcp: false` (tra cứu qua `search_web`/`read_url_content`). Chỉ `ct-test-engineer` có `inheritMcp: true`; vai trò này vốn đã ADVISORY vì có shell.
     - Codex: không áp dụng (mọi mức là ADVISORY).
+12. **Ownership theo phiên, không chỉ theo tên bộ điều phối:**
+    - `claim` cấp một `owner_token` ngẫu nhiên (`secrets.token_hex(16)`) và ghi `owner_session_id`, là mã chat tin cậy lấy từ `chat_id_from_env` hoặc `--session-id` (null nếu không có).
+    - Mọi thao tác cập nhật, bàn giao hay release đều phải xuất trình token, **hoặc** có `owner_session_id` khác null và bằng mã phiên tin cậy hiện tại. Cách thứ hai để Claude Code không mất quyền sau khi nén ngữ cảnh.
+    - Phiên khác không có token thì HOLD. Không có timeout tự giải phóng.
+    - Lấy lại task từ một phiên đã mất phải qua `takeover`, có `user_confirmed: true`. `generation` tăng sau mỗi lần đổi chủ, và lịch sử chủ cũ được lưu lại.
+    - Token **không** được ghi ra file nào khác ngoài `orchestration.json` (nơi giữ để so khớp). Controller giữ token trong ngữ cảnh. Tài liệu ghi rõ: token chống va chạm giữa các phiên làm đúng quy trình; nó không chống được một tiến trình cố ý đọc file.
+13. **Trạng thái sau rollback hoặc recover:**
+    - Mọi đích trở về đúng trạng thái trước giao dịch.
+    - Journal và staging bị xoá.
+    - **Thư mục backup được giữ lại** và trả về trong kết quả, làm điểm khôi phục và bằng chứng.
+    - Journal ghi sha256 của từng bản sao lưu. `recover` kiểm tra lại toàn bộ hash trước khi khôi phục; một bản sao lưu bị thiếu hoặc lệch hash thì raise `RecoveryUnsafeError`, **không khôi phục gì** và giữ nguyên journal.
 
 ## Bảng chuyển test
 
@@ -180,7 +207,6 @@
 - `roles`: đúng 6 khoá, mỗi khoá `{tier}`.
 - `effort_vocabulary`; `static_agent_model` ∈ `{default, omit}`; `tool_allowlist_enforced` (bool).
 - `tools`: các khoá `read`, `docs_lookup`, `write`, `shell`, `browser_testing`, `delegate`.
-- `read_only_mcp_patterns`: danh sách pattern fnmatch.
 - `agent_format` ∈ `{claude-md, codex-toml, antigravity-md}`.
 - `paths`: `skill_dir`, `agents_dir`, `global_rules_file`, `state_file`; chỉ dùng placeholder `{config_root}` và `{home}`.
 - `project_paths`: `skill_dir`, `agents_dir`; đường dẫn tương đối, không có `..`.
@@ -202,7 +228,6 @@
 | tools.shell | `Bash, PowerShell` | `[]` | `run_command, manage_task` |
 | tools.browser_testing | `Bash, PowerShell` | `[]` | `run_command` |
 | tools.delegate | `Agent` | `[]` | `invoke_subagent, define_subagent` |
-| read_only_mcp_patterns | `mcp__*context7*__resolve-library-id`, `mcp__*context7*__query-docs`, `mcp__*context7*__get-library-docs` | `[]` | `[]` |
 | agent_format | `claude-md` | `codex-toml` | `antigravity-md` |
 | paths.skill_dir | `{config_root}/skills/coding-team` | `{home}/.agents/skills/coding-team` | `{config_root}/config/skills/coding-team` |
 | paths.agents_dir | `{config_root}/agents` | `{config_root}/agents` | `{config_root}/config/agents` |
@@ -227,7 +252,7 @@
     - `project_paths` tuyệt đối hoặc có `..`;
     - placeholder `{user}`;
     - `schema_version: 1`;
-    - `read_only_mcp_patterns` không phải danh sách.
+    - có khoá lạ `read_only_mcp_patterns` (khoá này đã bị loại khỏi lược đồ).
   - `test_duplicate_keys_rejected`: khoá trùng ở cấp gốc và cấp lồng.
   - `test_config_root_env_and_empty_env`: `CLAUDE_CONFIG_DIR=<tmp>/cfg` cho `<tmp>/cfg/skills/coding-team`; giá trị `""` và `"  "` cho `<home>/.claude/...`.
   - `test_project_scope_paths`: `skill_dir == project_dir/'.claude/skills/coding-team'`; `global_rules_file is None`; `state_file` vẫn ở cấp người dùng.
@@ -275,7 +300,7 @@
 **Quy tắc `guarantees`.** Ký hiệu:
 - `E = cfg['tool_allowlist_enforced']`;
 - `shell_like` = có `shell`, `shell:checks` hoặc `browser_testing`;
-- `unsafe_mcp` = có công cụ trong `extra_mcp_tools` không khớp `read_only_mcp_patterns`, **hoặc** `inherits_mcp(...)`.
+- `unsafe_mcp` = `extra_mcp_tools(...)` khác rỗng, **hoặc** `inherits_mcp(...)`. Mọi MCP đều được coi là chưa xác minh, không xét tên.
 
 Quy tắc:
 - `no_file_write`:
@@ -323,10 +348,10 @@ Quy tắc:
     - `ct-test-engineer`: `no_delegate == 'ADVISORY'`.
     - Trên Codex, mọi guarantee khác `N/A` đều là `ADVISORY`.
     - Trên Antigravity, `ct-researcher` có `no_file_write == 'ENFORCED'` và `inheritMcp: false`.
-  - `test_docs_mcp_read_only_vs_unsafe`:
-    - `mcp_tools={'docs_lookup': ['mcp__plugin_context7_context7__query-docs']}`: tools của `ct-researcher` chứa công cụ đó, và `no_file_write`, `no_delegate` vẫn `ENFORCED`;
-    - với `['mcp__x__run_command']`: cả hai thành `ADVISORY`;
-    - `ct-architect` (không có `docs_lookup`) không nhận công cụ MCP nào.
+  - `test_any_mcp_tool_downgrades_guarantees`:
+    - `mcp_tools={'docs_lookup': ['mcp__plugin_context7_context7__query-docs']}`: tools của `ct-researcher` chứa công cụ đó, và `no_file_write`, `no_delegate` đều là `ADVISORY`; với `['mcp__x__run_command']` cũng vậy;
+    - không có `mcp_tools` thì `ct-researcher` giữ `ENFORCED`;
+    - `ct-architect` (không có `docs_lookup`) không nhận công cụ MCP nào và giữ `ENFORCED`.
   - `test_read_only_never_gets_shell_or_delegate`: tools của Claude Code `ct-architect` đúng là `Read, Grep, Glob`; không biến thể nào có `Agent`; trên Antigravity không biến thể nào có `invoke_subagent` hay `define_subagent`.
   - `test_claude_frontmatter`: có `model: opus` và `effort: high`; không có `isolation:`; bắt đầu bằng `---\n`; không có BOM.
   - `test_codex_toml_parses_without_model_or_sandbox`: parse bằng `tomllib`; có đủ 3 khoá bắt buộc; không có `model`, `model_reasoning_effort`, `sandbox_mode`. Thân chứa `'''` và `\` vẫn được giữ nguyên văn.
@@ -353,7 +378,7 @@ Quy tắc:
   - `test_every_role_has_tier_and_body`: mọi phần tử của `ROLES` có tier trong mỗi platform JSON, và có thân không rỗng.
   - `test_rendered_paths_are_relative_and_safe`: không đường dẫn nào tuyệt đối hay chứa `..`.
 - [ ] **Step 2: Chạy** `python -m unittest tests.test_integration_foundation -v` cùng toàn bộ test. Kỳ vọng PASS (test FAIL thì sửa task gốc, không nới test).
-- [ ] **Step 3: Commit cục bộ** (`test: foundation integration checkpoint`). Sau khi review đạt, Controller push nhánh.
+- [ ] **Step 3: Commit cục bộ** (`test: foundation integration checkpoint`). Sau khi review đạt, Controller push nhánh và kiểm tra CI đúng commit; xong thì **Phần A hoàn thành**.
 
 ### Task 5: State bật/tắt và lệnh mới `ct_policy`
 
@@ -439,7 +464,7 @@ Khối chỉ dẫn (tiếng Anh) phải chứa:
 **Interfaces:**
 - Consumes: `ct_platform.*`, `ct_roles.load_roles`, `ct_roles.render_all`, `ct_rules.*`, `ct_policy.initialize_state`, `ct_storage.*`.
 - Produces:
-  - Các lớp lỗi (đều là `ValueError` và đều có `.paths: list[str]`): `UnmanagedTargetError`, `ModifiedTargetError`, `IncompleteTransactionError`. Ngoài ra `class InstallRolledBack(RuntimeError)`.
+  - Các lớp lỗi (đều là `ValueError` và đều có `.paths: list[str]`): `UnmanagedTargetError`, `ModifiedTargetError`, `IncompleteTransactionError`, `RecoveryUnsafeError`. Ngoài ra `class InstallRolledBack(RuntimeError)`.
   - `@dataclass InstallPlan`:
     - `platform`, `scope`, `paths: dict`;
     - `files: list[tuple[str, str, bytes]]` (root label `'skill_dir'` hoặc `'agents_dir'`, đường dẫn tương đối POSIX, nội dung);
@@ -450,7 +475,7 @@ Khối chỉ dẫn (tiếng Anh) phải chứa:
     - các file của skill: `SKILL.md`, `LICENSE`, `references/**`, `agents/roles/**`, `scripts/*.py` (trừ `export_evaluation_inputs.py` và `build_runtime_package.py`), `platforms/<platform>.json`; riêng Codex thêm `agents/openai.yaml`.
   - `preview(plan) -> dict`: **chỉ đọc**; trả `would_write`, `would_backup`, `would_remove`, `conflicts: {'unmanaged': [...], 'modified': [...], 'linked': [...]}`, `journal_present: bool`.
   - `apply_plan(plan, *, dry_run: bool, replace_unmanaged: bool, overwrite_modified: bool) -> dict`. Kết quả gồm `dry_run`, `written`, `unchanged`, `removed_stale`, `kept_modified_stale`, `modified_overwritten`, `backup_dir`, `manifest`, `rules_file`, `state`.
-  - `recover(cfg, *, scope, env, home, project_dir) -> dict`: trả `restored`, `deleted_new`, `journal_removed`.
+  - `recover(cfg, *, scope, env, home, project_dir) -> dict`: trả `restored`, `deleted_new`, `journal_removed`, `backup_dir`. Trước khi khôi phục, kiểm tra sha256 của mọi bản sao lưu ghi trong journal; thiếu hoặc lệch thì raise `RecoveryUnsafeError` mà không đụng vào gì.
   - `uninstall(cfg, *, scope, env, home, project_dir, dry_run, remove_modified) -> dict`: trả `removed`, `kept_modified`, `missing`, `rules_removed`, `backup_dir`.
   - Hằng số `MANIFEST_NAME = 'install-manifest.json'`.
 
@@ -477,10 +502,10 @@ Khối chỉ dẫn (tiếng Anh) phải chứa:
 3. Nếu `journal_file` tồn tại, raise `IncompleteTransactionError` kèm gợi ý `coding_team.py install --recover`.
 4. Đánh giá xung đột theo bảng trên. Có xung đột chưa được cho phép thì raise; tới lúc này chưa ghi gì.
 5. Dựng staging trong `backup_root/.staging-<ts>`. Sao lưu mọi đích sẽ bị thay hoặc xoá (kể cả file chỉ dẫn toàn cục) vào `backup_root/<ts>/`.
-6. Ghi journal bằng `atomic_write`, gồm `started_at`, `backup_dir`, và `targets: [{path, existed, backup}]`.
+6. Ghi journal bằng `atomic_write`, gồm `started_at`, `backup_dir`, và `targets: [{path, existed, backup, backup_sha256}]`.
 7. Thay từng file bằng `atomic_write`, xoá các file cũ thuộc diện bị xoá, rồi `upsert_block` và `initialize_state`.
 8. Ghi manifest (`installed_at` chỉ đổi khi có thay đổi), xoá journal, xoá staging.
-9. Bất kỳ `Exception` nào ở bước 5–8: khôi phục theo journal (chép lại bản sao lưu, xoá file mới tạo), xoá journal, rồi raise `InstallRolledBack`.
+9. Bất kỳ `Exception` nào ở bước 5–8: khôi phục theo journal (chép lại bản sao lưu, xoá file mới tạo), xoá journal và staging, **giữ backup** (theo Quyết định 13), rồi raise `InstallRolledBack`.
 
 Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` là `None`).
 
@@ -504,8 +529,17 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
   - `test_modified_file_conflict_by_default`: cài; người dùng sửa `agents/ct-architect.md`; cài lại thì raise `ModifiedTargetError` có đường dẫn đó, và **không file nào thay đổi**. Có `overwrite_modified=True` thì thành công, bản sửa nằm trong backup, đường dẫn nằm trong `modified_overwritten`.
   - `test_unmanaged_target_requires_flag`: có sẵn `skill_dir/SKILL.md` thì raise `UnmanagedTargetError`; có `replace_unmanaged=True` thì thành công, bản cũ nằm trong backup.
   - `test_linked_target_refused` (Review Focus 5): `agents_dir` là symlink hoặc junction trỏ ra một thư mục ngoài thì raise `LinkedPathError`, thư mục ngoài không bị đổi. Không tạo được liên kết thì `skipTest`.
-  - `test_rollback_on_exception`: lần cài thứ hai dùng nội dung khác. Patch `ct_install.atomic_write` để raise `OSError` ở **lần ghi thứ 2 vào một file đích của plan** (không tính journal, backup hay manifest). Kỳ vọng `InstallRolledBack`; cây giống hệt sau lần cài đầu; không còn journal hay staging.
-  - `test_killed_process_leaves_journal_then_recover`: chạy cài trong subprocess với một script nhỏ patch `ct_install.atomic_write` để gọi `os._exit(1)` ở lần ghi thứ 2 vào một file đích của plan, tức là sau khi journal đã được ghi. Sau đó: journal còn; `apply_plan` lần sau raise `IncompleteTransactionError`; `recover(...)` đưa cây về trạng thái trước lần cài bị tắt và xoá journal; cài lại thì thành công.
+  - `test_rollback_on_exception`: lần cài thứ hai dùng nội dung khác. Patch `ct_install.atomic_write` để raise `OSError` ở **lần ghi thứ 2 vào một file đích của plan** (không tính journal, backup hay manifest). Kỳ vọng:
+    - `InstallRolledBack`;
+    - cây, **trừ thư mục `backups/`**, giống hệt sau lần cài đầu;
+    - không còn journal hay staging;
+    - thư mục backup của lần cài thứ hai vẫn còn và được nêu trong thông báo lỗi.
+  - `test_killed_process_leaves_journal_then_recover`: chạy cài trong subprocess với một script nhỏ patch `ct_install.atomic_write` để gọi `os._exit(1)` ở lần ghi thứ 2 vào một file đích của plan, tức là sau khi journal đã được ghi. Sau đó:
+    - journal còn;
+    - `apply_plan` lần sau raise `IncompleteTransactionError`;
+    - `recover(...)` đưa cây (trừ `backups/`) về trạng thái trước lần cài bị tắt, xoá journal và giữ backup;
+    - cài lại thì thành công.
+  - `test_recover_refuses_tampered_backup`: tạo lại tình huống bị tắt như trên, rồi sửa một byte trong bản sao lưu. `recover` raise `RecoveryUnsafeError`; journal, các đích và backup đều không bị đụng tới.
   - `test_concurrent_install_waits_for_lock`: tiến trình con giữ `locked(lock_file)` 2 giây; `apply_plan` hoàn tất sau khi khoá được nhả.
   - `test_scope_rules`: project kết hợp `default` raise; project kết hợp `global_rules` raise; cài theo project không đụng `state_file` hay `global_rules_file`.
   - `test_default_and_state_preservation`.
@@ -545,7 +579,7 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
   - hành vi khi `backup_root` nằm trên ổ khác.
 
   Mọi phát hiện Critical hoặc Important phải được sửa trong task gốc trước khi push.
-- [ ] **Step 4: Commit cục bộ** (`test: policy and installer integration checkpoint`). Sau khi review đạt, Controller push nhánh.
+- [ ] **Step 4: Commit cục bộ** (`test: policy and installer integration checkpoint`). Sau khi review đạt, Controller push nhánh và kiểm tra CI đúng commit; xong thì **Phần B hoàn thành**.
 
 ### Task 9: Ownership điều phối, phân luồng tất định và bàn giao `ct_orchestration`
 
@@ -561,13 +595,21 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
   - `orchestration_file(workspace: Path) -> Path`: `<worktree chính>/.coding-team/orchestration.json`. Worktree chính lấy từ mục `worktree` đầu tiên của `git -C <workspace> worktree list --porcelain`. Nếu không phải repo git thì dùng `<workspace>/.coding-team/orchestration.json`.
   - `unresolved_sdd_workspaces(workspace: Path) -> list[str]`: các đường dẫn tuyệt đối dạng POSIX của `.superpowers/sdd/*/progress.md`, quét **mọi** worktree.
   - `status(workspace, task_id: str | None = None) -> dict`: trả `tasks` (mọi record), `unresolved_sdd` (đã trừ các mục được record của `task_id` acknowledge), `can_claim: bool`, `blockers`, và `note` với nội dung cố định `"unresolved SDD workspaces indicate unfinished progress, not a running process"`.
-  - `claim(workspace, task_id, mode, phase) -> dict`: raise `OrchestrationConflict` khi task đã có owner khác `coding-team`, hoặc còn workspace SDD chưa được acknowledge. Claim lại một task mà `coding-team` đang giữ thì chỉ cập nhật `mode` và `phase`.
-  - `validate_handoff(record: dict, current_owner: str | None, unresolved: list[str]) -> None`.
-  - `handoff(workspace, record) -> dict`: trả về record kèm `termination_evidence: 'caller-asserted'`, `from_verified: bool`.
-  - `release(workspace, task_id) -> dict`.
+  - `claim(workspace, task_id, mode, phase, *, session_id: str | None, token: str | None = None) -> dict`:
+    - Task chưa có record, và không có workspace SDD nào chưa được acknowledge: tạo record với `orchestrator='coding-team'`, `owner_token` mới, `owner_session_id=session_id`, `generation=1`. Trả về record **kèm token**. Đây là lần duy nhất token xuất hiện trong output.
+    - Task đã có record: chỉ cập nhật `mode` và `phase` khi `token == owner_token`, hoặc khi `owner_session_id` khác null và bằng `session_id`. Mọi trường hợp khác raise `OrchestrationConflict` (một phiên khác đang giữ task), kể cả khi owner cũng là `coding-team`.
+  - `takeover(workspace, task_id, *, session_id, reason: str, user_confirmed: bool) -> dict`:
+    - `user_confirmed` khác `True` thì raise `ValueError`.
+    - Nếu không, cấp token mới, gán `owner_session_id=session_id`, tăng `generation`, và thêm chủ cũ vào `history` (gồm `generation`, `owner_session_id`, `orchestrator`, `reason`, `at`; **không** lưu token cũ).
+  - `validate_handoff(record: dict, current: dict | None, unresolved: list[str], *, session_id) -> None`.
+  - `handoff(workspace, record, *, session_id) -> dict`:
+    - Kết quả kèm `termination_evidence: 'caller-asserted'` và `from_verified: bool`.
+    - Khi `to == 'coding-team'`, kết quả có thêm token của chủ mới.
+  - `release(workspace, task_id, *, session_id, token=None) -> dict`: dùng cùng quy tắc xác minh chủ như khi cập nhật trong `claim`.
+  - Không hàm `status` nào trả về `owner_token`. Thay vào đó trả `owner_session_id`, `generation`, `has_token: true`.
   - `route(facts: dict) -> dict`: trả `{'orchestrator', 'rule': int, 'reason': str}`.
 
-**File state:** `{"schema_version": 1, "tasks": {task_id: {"orchestrator", "mode", "phase", "handoff_from", "handoff_record", "acknowledged_sdd": []}}}`. Mọi lần ghi giữ `locked(orchestration_file)`. Lần đầu tạo `.coding-team/.gitignore` với nội dung `*\n`.
+**File state:** `{"schema_version": 1, "tasks": {task_id: {"orchestrator", "owner_session_id", "owner_token", "generation", "mode", "phase", "handoff_from", "handoff_record", "acknowledged_sdd": [], "history": []}}}`. Mọi lần ghi giữ `locked(orchestration_file)`. Lần đầu tạo `.coding-team/.gitignore` với nội dung `*\n`.
 
 **Bàn giao:**
 - Các trường bắt buộc giữ như spec §6.5:
@@ -577,9 +619,12 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
   - `tests{commands, result, snapshot}`;
   - `findings`, `previous_ledger`, `acknowledged_sdd`.
 - Kiểm tra thêm:
-  - nếu task đã có record thì `from` phải bằng owner của record, ngược lại raise; khi đó `from_verified = True`;
-  - nếu task chưa có record thì `from_verified = False`;
-  - mọi mục của `acknowledged_sdd` phải nằm trong `unresolved`.
+  - Task đã có record:
+    - `from` phải bằng `orchestrator` của record;
+    - người bàn giao phải xác minh được là chủ: `record['token'] == owner_token`, hoặc `owner_session_id` khác null và bằng `session_id`;
+    - không đạt thì raise; đạt thì `from_verified = True`.
+  - Task chưa có record: bắt buộc `record['user_confirmed'] is True`, ngược lại raise. `from_verified = False`.
+  - Mọi mục của `acknowledged_sdd` phải nằm trong `unresolved`.
 
 **Fact của `route`** (bắt buộc đủ):
 - `level` ∈ `L0..L3`;
@@ -601,16 +646,21 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
   - `test_unresolved_sdd_blocks_claim_and_is_not_called_running`: có `progress.md` thì `can_claim` là `False` và có `note`; `claim` raise.
   - `test_ownership_shared_across_worktrees`:
     - tạo repo git tạm, `git worktree add ../wt-b`;
-    - claim `task-1` ở worktree chính, rồi `status(wt-b, 'task-1')` thấy owner;
+    - claim `task-1` ở worktree chính với `session_id='A'`, rồi `status(wt-b, 'task-1')` thấy owner; `claim(wt-b, 'task-1', session_id='B')` raise;
     - tạo SDD trong `wt-b`, rồi `claim` `task-2` ở worktree chính bị chặn;
     - file nằm ở `<main>/.coding-team/orchestration.json`, **không nằm trong `.git/`**;
     - máy không có `git` thì `skipTest`.
   - `test_non_git_workspace_uses_local_dir`.
+  - `test_second_session_cannot_reclaim_same_task`: phiên `A` claim `task-1` và nhận token. Phiên `B` gọi `claim(task-1, session_id='B')` không kèm token thì raise `OrchestrationConflict`, kể cả khi owner là `coding-team`. Phiên `A` claim lại bằng token (hoặc chỉ bằng `session_id='A'`) thì cập nhật được `phase`, `generation` vẫn là 1.
+  - `test_session_less_owner_requires_token`: claim với `session_id=None`; claim lại không có token thì raise; có token thì được.
+  - `test_takeover_requires_user_confirmation`: `takeover(..., user_confirmed=False)` raise. Với `True`: `generation == 2`, token cũ không còn dùng được, `history` có chủ cũ nhưng không chứa token.
+  - `test_status_never_exposes_token`: chuỗi JSON của `status` không chứa giá trị token.
   - `test_handoff_validation`:
     - thiếu `evidence`, `terminated: False`, hoặc thiếu `snapshot.untracked` đều raise, và thông báo có tên trường;
-    - `from` không khớp owner hiện tại thì raise;
+    - task đã có record mà bàn giao không có token và sai phiên thì raise;
+    - task chưa có record mà không có `user_confirmed` thì raise;
     - acknowledge một đường dẫn không nằm trong `unresolved` thì raise.
-  - `test_valid_handoff_then_claim`: bàn giao từ SDD sang coding-team kèm acknowledge, sau đó `claim` thành công; kết quả có `termination_evidence == 'caller-asserted'` và `from_verified is False`.
+  - `test_valid_handoff_then_claim`: bàn giao từ SDD sang coding-team, có `user_confirmed: true` và acknowledge, trả về token của chủ mới. Sau đó `claim` với token đó thành công. Kết quả bàn giao có `termination_evidence == 'caller-asserted'` và `from_verified is False`.
   - `test_route_order`: mỗi rule 0–8 có một ca; thêm ca "đổi tên trên 10 file" (`L1`, mọi bool là `False`) cho `leader-direct`, và ca "xác thực 2 file" (`L3`) cho `coding-team`; `superpowers_available=False` thì các rule 5 và 6 trả `coding-team`; fact thiếu khoá thì raise `ValueError`.
   - `test_gitignore_and_release`.
 - [ ] **Step 2: Chạy test.** Kỳ vọng FAIL.
@@ -635,11 +685,13 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
     - `command TEXT [--platform P] [--chat-id ID] [--state F]`. Lỗi cú pháp cũ trả JSON có `hint`.
     - `doctor [--platform P] [--scope …] [--project-dir D]`
     - `check-config [--platform P | --input F]`
-    - `orchestrator {status|claim|handoff|release|route} [--workspace W] [--task-id T] [--mode M] [--phase PH] [--input F]`
+    - `orchestrator {status|claim|takeover|handoff|release|route} [--workspace W] [--task-id T] [--mode M] [--phase PH] [--input F] [--session-id ID] [--token TOKEN] [--reason R] [--user-confirmed]`
+    - Với `orchestrator`, `session_id` lấy từ `--session-id`, nếu không có thì từ `chat_id_from_env` của nền tảng đã xác định. Không có nền tảng thì để `None`; không bao giờ đoán.
   - `resolve_platform(arg, env) -> str`. Thứ tự: tham số; `install-manifest.json` ở `Path(__file__).parents[1]`; `detect_platform(env)`; không xác định được thì raise `ValueError('cannot determine platform; pass --platform')`.
   - `doctor(cfg, *, scope, env, home, project_dir) -> dict`. Khoá:
     - `manifest`, `modified_files`, `missing_files`, `journal_present`;
     - `agents: {variant: {present, requested_tier, model_in_file, guarantees}}` (guarantees tính kèm `options.docs_mcp` trong manifest);
+    - `model_availability: 'unverified'`: luôn là giá trị này, vì `doctor` không gọi runtime nên không biết tài khoản có dùng được model hay không;
     - `force_model_env_active`;
     - `state`, `rules_block`;
     - `superpowers: {installed: 'found'|'not_found', enabled: true|false|null, available_in_session: 'determined by Leader at runtime'}`;
@@ -658,7 +710,14 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
     - có journal còn sót thì `journal_present: true` và exit 1.
   - `test_install_conflict_exit_codes`: file bị sửa cho exit 2 và JSON liệt kê đường dẫn; thêm `--overwrite-modified` thì exit 0; `--dry-run` cho exit 0 kèm `conflicts`.
   - `test_check_config`: hợp lệ cho exit 0; tầng lạ cho exit 2; file thiếu cho exit 2 và không tạo file nào.
-  - `test_orchestrator_cli`: `status` khi có SDD dở cho exit 1; `handoff --input` cho exit 0; `claim` cho exit 0; `route --input facts.json` trả `orchestrator`.
+  - `test_orchestrator_cli`:
+    - `status` khi có SDD dở cho exit 1;
+    - `handoff --input --user-confirmed` cho exit 0 và có `token`;
+    - `claim --token` cho exit 0;
+    - `claim --session-id other` không kèm token cho exit 2;
+    - `takeover` thiếu `--user-confirmed` cho exit 2;
+    - `route --input facts.json` trả `orchestrator`;
+    - stdout của `status` không chứa token.
 - [ ] **Step 2: Chạy test.** Kỳ vọng FAIL.
 - [ ] **Step 3: Viết `scripts/coding_team.py`.** Ngay đầu file, chèn thư mục của chính nó vào `sys.path`.
 - [ ] **Step 4: Đối chiếu Bảng chuyển test.** Với mỗi test thay thế trong bảng, chạy `python -m unittest tests.<module>.<Class>.<test> -v` và xác nhận PASS.
@@ -671,12 +730,16 @@ Không có gì cần sao lưu thì không tạo thư mục backup (`backup_dir` 
 - Create: `tests/test_integration_cli.py`
 
 - [ ] **Step 1: Viết test** (qua subprocess CLI):
-  - `test_two_sessions_concurrently`: 10 tiến trình song song đổi xen kẽ hai mã chat `s1` và `s2`, kèm một lệnh `--global`. Cuối cùng cả hai chat override và global đều đúng với lệnh cuối cùng của từng nguồn, không mất cập nhật nào.
-  - `test_orchestration_across_worktrees_via_cli`: dùng repo git tạm có 2 worktree; `orchestrator claim` ở A, rồi `orchestrator status --task-id` ở B thấy owner, và `claim` cùng `task_id` với owner khác bị từ chối (exit 2).
+  - `test_concurrent_sessions_no_lost_updates`: kết quả phải xác định, không phụ thuộc thứ tự tiến trình.
+    - Pha 1: 10 tiến trình song song, mỗi tiến trình đặt một mã chat **riêng** (`s0`…`s9`) sang `OFF` (nếu chỉ số chẵn) hoặc `ON` (nếu lẻ).
+    - Pha 2, sau khi pha 1 xong: một lệnh `off --global`.
+    - Kỳ vọng `chat_policies` có đủ 10 mục với giá trị đúng như trên, và `global_policy == 'OFF'`.
+  - `test_concurrent_claims_single_winner`: 5 tiến trình song song cùng `orchestrator claim --task-id t1`, mỗi tiến trình một `--session-id` khác nhau. Kỳ vọng đúng 1 tiến trình exit 0 và 4 tiến trình exit 2; record cuối có `owner_session_id` là của tiến trình thắng.
+  - `test_orchestration_across_worktrees_via_cli`: dùng repo git tạm có 2 worktree; `orchestrator claim --session-id A` ở worktree A, rồi `orchestrator status --task-id` ở B thấy owner; `claim --session-id B` cùng `task_id` bị từ chối (exit 2).
   - `test_corrupt_files_fail_closed`: `state.json` hỏng thì `status` exit 2 và byte của file không đổi; `orchestration.json` hỏng thì `orchestrator status` exit 2 và byte không đổi; `install-manifest.json` hỏng thì `doctor` exit 1 với `manifest: 'invalid'`.
   - `test_install_from_extracted_runtime_package`: `build_runtime_package` (tạm thời gọi trực tiếp module) → giải nén → chạy `install` từ thư mục giải nén thành công. Nếu chưa có thư mục `platforms` trong gói thì `expectedFailure`; Task 14 sẽ bỏ đánh dấu này.
 - [ ] **Step 2: Chạy toàn bộ test.** Kỳ vọng PASS (trừ `expectedFailure` đã nêu).
-- [ ] **Step 3: Commit cục bộ** (`test: CLI end-to-end integration checkpoint`). Sau khi review đạt, Controller push nhánh.
+- [ ] **Step 3: Commit cục bộ** (`test: CLI end-to-end integration checkpoint`). Sau khi review đạt, Controller push nhánh và kiểm tra CI đúng commit; xong thì **Phần C hoàn thành**.
 
 ### Task 12: Viết lại SKILL.md và references
 
@@ -714,6 +777,11 @@ Yêu cầu nội dung (mỗi dòng là một quyết định phải có mặt):
   - phân loại skill;
   - coding-team giữ cả task và dùng spec/plan của Superpowers;
   - ownership theo repo và vị trí file (không nằm trong `.git/`);
+  - token và phiên của chủ task:
+    - phiên khác không có token thì HOLD;
+    - `takeover` cần người dùng xác nhận;
+    - Leader giữ token trong ngữ cảnh và không ghi ra file khác;
+    - giới hạn: token không chống được việc cố ý đọc file;
   - unresolved SDD ≠ tiến trình đang chạy;
   - các trường bàn giao, kèm câu "termination evidence is caller-asserted: verify with runtime tools before recording";
   - các lệnh CLI;
@@ -781,7 +849,7 @@ Yêu cầu nội dung:
 - **README:**
   - tên repo `chauvbm/coding-team`, giới thiệu cho 3 nền tảng;
   - mỗi nền tảng một khối lệnh cài: clone, `install --dry-run`, rồi `install --platform <p> [--default on|off] [--global-rules]`;
-  - Claude Code có ví dụ `--docs-mcp` cho Context7;
+  - Claude Code có ví dụ `--docs-mcp` cho Context7, kèm câu "granting any MCP tool makes `ct-researcher` guarantees ADVISORY";
   - chính sách xung đột và các cờ; `--recover`;
   - phần chuyển từ bản cài cũ, bọc trong `<!-- legacy-migration -->`;
   - bảng lệnh;
@@ -810,7 +878,7 @@ Yêu cầu nội dung:
 - [ ] **Step 2: Chạy các test đó.** Kỳ vọng FAIL.
 - [ ] **Step 3: Sửa hai script; viết README, CONTRIBUTING, docs/smoke.**
 - [ ] **Step 4: Chạy toàn bộ test.** Kỳ vọng PASS.
-- [ ] **Step 5: Commit cục bộ** với message `docs: multi-platform README and smoke/evaluation kit; package platforms`.
+- [ ] **Step 5: Commit cục bộ** với message `docs: multi-platform README and smoke/evaluation kit; package platforms`. Sau khi review Task 12–14 đạt và toàn bộ test PASS, Controller push nhánh và kiểm tra CI đúng commit; xong thì **Phần D hoàn thành**.
 
 ### Task 15: Kiểm chứng cuối, release gate và merge
 
@@ -819,11 +887,21 @@ Yêu cầu nội dung:
 
 - [ ] **Step 1:** `python -m unittest discover -s tests -p "test_*.py" -v` và `git diff --check main...HEAD`. Kỳ vọng mọi test PASS (các SKIP có sẵn từ trước vẫn được phép), không có lỗi khoảng trắng.
 - [ ] **Step 2: Final review toàn nhánh** (do SDD đảm nhiệm), đối chiếu với spec bản 2 và mọi mục trong Global Constraints.
-- [ ] **Step 3: Dry-run chỉ đọc trên máy thật:** `python scripts/coding_team.py install --platform claude-code --dry-run --global-rules`. Xác nhận các đích nằm dưới `%USERPROFILE%\.claude`, và cây thư mục không đổi (so sánh danh sách file trước và sau trong `.claude/coding-team`). Báo kết quả cho người dùng.
+- [ ] **Step 3: Dry-run chỉ đọc trên máy thật:** `python scripts/coding_team.py install --platform claude-code --dry-run --global-rules`.
+  - Trước và sau khi chạy, chụp **mọi đích có thể bị ghi** (tồn tại hay không, kích thước, sha256): `skills/coding-team/`, `agents/ct-*.md`, `CLAUDE.md`, `coding-team/` (gồm state, `backups`, `install.lock`, journal), tất cả dưới `config_root` thật.
+  - Kỳ vọng hai ảnh chụp giống hệt.
+  - Báo cho người dùng danh sách đích và các xung đột (nếu có).
 - [ ] **Step 4: Smoke test và đánh giá Claude Code.** **Hỏi người dùng trước**, vì việc này tốn token và chạy một phiên `claude -p` lồng nhau. Cài `--scope project` vào một thư mục tạm, làm theo `docs/smoke/platform-smoke.md`, ghi `evaluations/2026-11-13-platform-smoke/claude-code.json`.
 - [ ] **Step 5: Release gate.**
   - Với Codex và Antigravity: người dùng tự chạy checklist rồi gửi kết quả, hoặc **xác nhận rõ ràng** chấp nhận merge khi các mục đó là `NOT_RUN`.
   - Ghi `evaluations/2026-11-13-platform-smoke/<platform>.json` cho cả 3 nền tảng; mục không chạy thì `status: NOT_RUN` kèm lý do.
+  - Ghi `evaluations/2026-11-13-platform-smoke/release.json` gồm:
+    - `merge_approved_by_user: true|false`;
+    - `compatibility_verified: {platform: true|false}`, trong đó `true` chỉ khi mọi check của nền tảng đó là `PASS`.
+  - README có bảng "Verified platforms" lấy từ `compatibility_verified`. **Được phép merge không có nghĩa là đã xác minh tương thích** trên mọi nền tảng.
   - Commit cục bộ (`test: record platform smoke results`), rồi Controller push nhánh.
 - [ ] **Step 6: Merge**, chỉ khi người dùng xác nhận: `git checkout main && git merge --ff-only feat/multi-platform && git push origin main`.
-- [ ] **Step 7: Cập nhật graph.** `graphify update .`, xác nhận `graphify-out/graph.json` đọc được. Kiểm tra CI bằng `gh run list --branch main --limit 1`, kỳ vọng `completed success`.
+- [ ] **Step 7: Cập nhật graph và kiểm tra CI.**
+  - `graphify update .`, xác nhận `graphify-out/graph.json` đọc được.
+  - Kiểm tra CI **đúng commit vừa merge**: `gh run list --branch main --commit $(git rev-parse HEAD) --json status,conclusion,headSha`, kỳ vọng có run với `headSha` trùng, `completed` / `success`. Chưa có run thì báo đang chờ, không lấy run của commit khác.
+  - Đề xuất với người dùng làm việc tiếp theo theo spec §10: benchmark coding-team AUTO, coding-team FULL_TEAM và Superpowers SDD trên các task coding thực tế.
