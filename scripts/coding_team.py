@@ -45,9 +45,31 @@ class CliError(Exception):
     """Argument error; reported as JSON instead of argparse's usage text."""
 
 
+class HelpRequested(Exception):
+    """-h/--help: reported as one JSON object {"help": text} with exit 0."""
+
+    def __init__(self, text):
+        super().__init__('help requested')
+        self.text = text
+
+
+# argparse echoes a rejected choice value; a secret typed in the wrong place must not be.
+_INVALID_CHOICE = re.compile(r"invalid choice: .*? \(choose from", re.S)
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message):
-        raise CliError(message)
+        raise CliError(_INVALID_CHOICE.sub('invalid choice (choose from', message))
+
+    def print_help(self, file=None):
+        raise HelpRequested(self.format_help())
+
+    def parse_args(self, args=None, namespace=None):
+        parsed, extras = self.parse_known_args(args, namespace)
+        if extras:
+            # Never echo the values: a token or secret may have been typed in the wrong place.
+            raise CliError('%d unrecognized argument(s) rejected; values are not shown' % len(extras))
+        return parsed
 
 
 # --- platform ------------------------------------------------------------------------------
@@ -352,6 +374,13 @@ def _context(args, env, home):
 def _install(args, env, home):
     cfg = _config(args.platform)
     if args.recover:
+        extra = [flag for flag, value in (('--dry-run', args.dry_run), ('--default', args.default),
+                                           ('--global-rules', args.global_rules), ('--docs-mcp', args.docs_mcp),
+                                           ('--replace-unmanaged', args.replace_unmanaged),
+                                           ('--overwrite-modified', args.overwrite_modified)) if value]
+        if extra:
+            raise CliError('--recover performs a real recovery and cannot be combined with '
+                           + ', '.join(extra) + '; only --platform, --scope and --project-dir apply')
         return dict(ct_install.recover(cfg, **_context(args, env, home)), platform=cfg['platform']), 0
     plan = ct_install.build_plan(SOURCE_ROOT, cfg, default=args.default, global_rules=args.global_rules,
                                  python=sys.executable, docs_mcp=args.docs_mcp, **_context(args, env, home))
@@ -474,11 +503,15 @@ def _error(error, action):
 
 def main(argv=None) -> int:
     env = dict(os.environ)
-    action = None
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # Known before parsing so that argument errors of status/command still fail closed.
+    action = argv[0] if argv and argv[0] in HANDLERS else None
     try:
         args = _parser().parse_args(argv)
         action = args.action
         result, code = HANDLERS[action](args, env, Path.home())
+    except HelpRequested as request:
+        result, code = {'help': request.text}, 0
     except Exception as error:  # every outcome is reported as one JSON object
         result, code = _error(error, action), 2
     print(json.dumps(result, default=str))

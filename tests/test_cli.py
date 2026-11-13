@@ -196,7 +196,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, data)
         self.assertIn(agent.as_posix(), data['modified_overwritten'])
         self.assertNotEqual(agent.read_bytes(), edited)
-        code, data, _ = self.run_cli('install', '--platform', 'claude-code', '--recover', '--dry-run')
+        code, data, _ = self.run_cli('install', '--platform', 'claude-code', '--recover')
         self.assertEqual((code, data['journal_removed']), (0, False))
         code, data, _ = self.run_cli('install', '--platform', 'claude-code', '--scope', 'project',
                                      '--project-dir', self.root, '--default', 'on')
@@ -204,6 +204,69 @@ class CliTests(unittest.TestCase):
         code, data, _ = self.run_cli('install', '--platform', 'nope')
         self.assertEqual(code, 2, data)
         self.assertIn('error', data)
+
+    def test_status_and_command_fail_closed_on_missing_or_corrupt_state(self):
+        for args in (('status',), ('command', '/coding-team off --global'), ('command', '/coding-team status')):
+            with self.subTest(state='missing', args=args):
+                code, data, _ = self.run_cli(*args, '--platform', 'claude-code')
+                self.assertEqual(code, 2, data)
+                self.assertIs(data['automatic_use_allowed'], False)
+                self.assertIn('error', data)
+                self.assertFalse(self.state.exists())
+        self.state.parent.mkdir(parents=True, exist_ok=True)  # a lock side-file may exist
+        for corrupt in (b'{not json', b'{"schema_version": 1, "global_policy": "MAYBE", "chat_policies": {}}'):
+            self.state.write_bytes(corrupt)
+            for args in (('status',), ('command', '/coding-team off --global'),
+                         ('command', '/coding-team on', '--chat-id', 'c1')):
+                with self.subTest(state=corrupt, args=args):
+                    code, data, _ = self.run_cli(*args, '--platform', 'claude-code')
+                    self.assertEqual(code, 2, data)
+                    self.assertIs(data['automatic_use_allowed'], False)
+                    self.assertEqual(self.state.read_bytes(), corrupt)
+        # Argument errors of status/command fail closed too.
+        code, data, _ = self.run_cli('status', '--platform', 'claude-code', '--bogus')
+        self.assertEqual((code, data['automatic_use_allowed']), (2, False))
+
+    def test_command_chat_id_option(self):
+        self.install()
+        code, data, _ = self.run_cli('command', '/coding-team off', '--platform', 'claude-code',
+                                     '--chat-id', 'c1', env={'CLAUDE_CODE_SESSION_ID': 'runtime'})
+        self.assertEqual(code, 0, data)
+        self.assertEqual((data['chat_id'], data['chat_policy'], data['effective_policy']), ('c1', 'OFF', 'OFF'))
+        state = json.loads(self.state.read_text(encoding='utf-8'))
+        self.assertEqual(state['chat_policies'], {'c1': 'OFF'})
+
+    def test_help_is_one_json_object(self):
+        for args in (('-h',), ('--help',), ('install', '--help'), ('orchestrator', '-h'), ('status', '-h')):
+            with self.subTest(args=args):
+                code, data, _ = self.run_cli(*args)
+                self.assertEqual(code, 0, data)
+                self.assertEqual(set(data), {'help'})
+                self.assertIn('usage:', data['help'])
+
+    def test_rejected_arguments_are_not_echoed(self):
+        secret = 'SECRETTOKEN0123456789'
+        for args in (('orchestrator', 'claim', '--task-id', 't1', '--mode', 'AUTO', '--phase', 'p', secret),
+                     ('orchestrator', secret), ('status', '--platform', 'claude-code', secret, secret),
+                     ('install', '--platform', secret)):
+            with self.subTest(args=args[:2]):
+                code, data, stdout = self.run_cli(*args, cwd=self.root)
+                self.assertEqual(code, 2, data)
+                self.assertNotIn(secret, stdout)
+        code, data, _ = self.run_cli('status', '--platform', 'claude-code', secret, secret)
+        self.assertIn('2 unrecognized argument(s) rejected', data['error'])
+
+    def test_recover_rejects_other_install_flags(self):
+        self.install()
+        journal = self.state.parent / 'install-journal.json'
+        journal.write_text('{}', encoding='utf-8')
+        for flags in (('--dry-run',), ('--default', 'on'), ('--global-rules',), ('--docs-mcp', 'ctx'),
+                      ('--replace-unmanaged',), ('--overwrite-modified',)):
+            with self.subTest(flags=flags):
+                code, data, _ = self.run_cli('install', '--platform', 'claude-code', '--recover', *flags)
+                self.assertEqual(code, 2, data)
+                self.assertIn('cannot be combined with ' + flags[0], data['error'])
+                self.assertEqual(journal.read_text(encoding='utf-8'), '{}')
 
     def test_check_config(self):
         code, data, _ = self.run_cli('check-config', '--platform', 'claude-code')
