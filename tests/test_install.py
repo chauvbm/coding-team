@@ -443,6 +443,129 @@ class InstallTests(unittest.TestCase):
         self.recover()
         self.assertEqual(snapshot(self.home, exclude=[self.paths()['backup_root']]), before)
 
+    def after_journal(self, mutate, name='claude-code'):
+        """Patch atomic_write so mutate() runs right after the journal is first written,
+        i.e. after assessment and backups and before any target is changed."""
+        journal = os.path.abspath(self.paths(name)['journal_file'])
+        real, done = ct_install.atomic_write, [False]
+
+        def hook(path, payload):
+            result = real(path, payload)
+            if not done[0] and os.path.abspath(path) == journal:
+                done[0] = True
+                mutate()
+            return result
+        return mock.patch.object(ct_install, 'atomic_write', side_effect=hook)
+
+    def test_change_during_install_rolls_back_and_keeps_user_bytes(self):
+        src = self.copy_source()
+        paths = self.paths()
+        paths['global_rules_file'].parent.mkdir(parents=True)
+        paths['global_rules_file'].write_bytes(b'# my rules\n')
+        self.install('claude-code', source=src)
+        skill, agent = paths['skill_dir'] / 'SKILL.md', paths['agents_dir'] / 'ct-architect.md'
+        skill_before = skill.read_bytes()
+        (src / 'SKILL.md').write_bytes(b'# second version\n')
+        role = src / 'agents/roles/ct-architect.md'
+        role.write_bytes(role.read_bytes() + b'\nSecond.\n')
+
+        def mutate():
+            agent.write_bytes(b'edited during install\n')
+            with open(paths['global_rules_file'], 'ab') as stream:
+                stream.write(b'edited too\n')
+
+        with self.after_journal(mutate):
+            with self.assertRaises(ct_install.InstallRolledBack) as caught:
+                self.install('claude-code', source=src, global_rules=True)
+        self.assertIn(agent.as_posix(), str(caught.exception))
+        self.assertEqual(agent.read_bytes(), b'edited during install\n')
+        self.assertEqual(paths['global_rules_file'].read_bytes(), b'# my rules\nedited too\n')
+        self.assertEqual(skill.read_bytes(), skill_before)
+        self.assertFalse(paths['journal_file'].exists())
+
+    def test_file_created_during_install_is_not_overwritten(self):
+        src = self.copy_source()
+        self.install('claude-code', source=src)
+        skill_dir = self.paths()['skill_dir']
+        skill_before = (skill_dir / 'SKILL.md').read_bytes()
+        (src / 'SKILL.md').write_bytes(b'# second version\n')
+        (src / 'references/aaa-new.md').write_bytes(b'new reference\n')
+        created = skill_dir / 'references/aaa-new.md'
+        with self.after_journal(lambda: created.write_bytes(b'user file\n')):
+            with self.assertRaises(ct_install.InstallRolledBack):
+                self.install('claude-code', source=src)
+        self.assertEqual(created.read_bytes(), b'user file\n')
+        self.assertEqual((skill_dir / 'SKILL.md').read_bytes(), skill_before)
+
+    def test_change_during_uninstall_rolls_back(self):
+        self.install('claude-code')
+        paths = self.paths()
+        skill, agent = paths['skill_dir'] / 'SKILL.md', paths['agents_dir'] / 'ct-architect.md'
+        skill_before = skill.read_bytes()
+        with self.after_journal(lambda: agent.write_bytes(b'edited during uninstall\n')):
+            with self.assertRaises(ct_install.InstallRolledBack):
+                self.uninstall()
+        self.assertEqual(agent.read_bytes(), b'edited during uninstall\n')
+        self.assertEqual(skill.read_bytes(), skill_before)
+        self.assertTrue((paths['skill_dir'] / ct_install.MANIFEST_NAME).is_file())
+        self.assertEqual(self.uninstall()['kept_modified'], [agent.as_posix()])
+
+    def move_behind_link(self, directory, name):
+        """Simulate a user moving a directory to dotfiles and linking it back."""
+        real = self.tmp / name
+        shutil.move(str(directory), str(real))
+        (real / 'other-skill').mkdir()
+        (real / 'other-skill/SKILL.md').write_bytes(b'other\n')
+        self.make_link(directory, real)
+        return real
+
+    def assert_link_kept(self, link, real):
+        self.assertTrue(os.path.lexists(link))
+        self.assertEqual((link / 'other-skill/SKILL.md').read_bytes(), b'other\n')
+        self.assertFalse((real / 'coding-team').exists())
+        self.assertTrue((self.home / '.agents').is_dir())
+
+    def test_uninstall_keeps_user_link_in_created_dirs(self):
+        self.install('codex')
+        skills = self.home / '.agents/skills'
+        real = self.move_behind_link(skills, 'dotfiles-skills')
+        self.assertEqual(self.uninstall('codex', dry_run=True)['kept_links'], [skills.as_posix()])
+        result = self.uninstall('codex')
+        self.assertEqual(result['kept_links'], [skills.as_posix()])
+        self.assert_link_kept(skills, real)
+
+    def test_recover_keeps_user_link_in_created_dirs(self):
+        args = {'scripts': str(SCRIPTS), 'platform': 'codex', 'source': str(ROOT), 'home': str(self.home)}
+        killed = subprocess.run([sys.executable, '-c', KILL_SCRIPT, json.dumps(args)],
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(killed.returncode, 1, killed.stderr)
+        skills = self.home / '.agents/skills'
+        real = self.move_behind_link(skills, 'dotfiles-skills')
+        result = self.recover('codex')
+        self.assertEqual(result['kept_links'], [skills.as_posix()])
+        self.assertEqual(result['deleted_new'], [(skills / 'coding-team/SKILL.md').as_posix()])
+        self.assert_link_kept(skills, real)
+
+    def test_rollback_keeps_user_link_in_created_dirs(self):
+        plan = self.plan('codex')
+        dests = {os.path.abspath(Path(plan.paths[label]) / rel) for label, rel, _ in plan.files}
+        skills = self.home / '.agents/skills'
+        real, count, holder = ct_install.atomic_write, [0], {}
+
+        def failing(path, payload):
+            if os.path.abspath(path) in dests:
+                count[0] += 1
+                if count[0] == 2:
+                    holder['real'] = self.move_behind_link(skills, 'dotfiles-skills')
+                    raise OSError('fixture write failure')
+            return real(path, payload)
+
+        with mock.patch.object(ct_install, 'atomic_write', side_effect=failing):
+            with self.assertRaises(ct_install.InstallRolledBack) as caught:
+                self.apply(plan)
+        self.assertIn('linked directories left in place: ' + skills.as_posix(), str(caught.exception))
+        self.assert_link_kept(skills, holder['real'])
+
     def test_corrupt_journal_refused(self):
         self.install('claude-code')
         journal = self.paths()['journal_file']

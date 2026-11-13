@@ -175,7 +175,22 @@ def _write_new(path, data):
         os.fsync(stream.fileno())
 
 
-def _rmdir_if_empty(directory):
+def _is_link(path):
+    """True for a symlink, junction or other reparse point (the path itself only)."""
+    try:
+        reject_links(path, path)
+        return False
+    except LinkedPathError:
+        return True
+
+
+def _rmdir_if_empty(directory, kept_links=None):
+    """rmdir an empty real directory. Never a link: on Windows rmdir removes a junction or
+    directory symlink even when its target is not empty. Links are reported in kept_links."""
+    if _is_link(directory):
+        if kept_links is not None and _posix(directory) not in kept_links:
+            kept_links.append(_posix(directory))
+        return False
     try:
         Path(directory).rmdir()
         return True
@@ -183,13 +198,13 @@ def _rmdir_if_empty(directory):
         return False
 
 
-def _prune(directory, root, include_root):
-    """Remove empty directories from directory up to root."""
+def _prune(directory, root, include_root, kept_links=None):
+    """Remove empty directories from directory up to root; stop at the first link."""
     directory, root = Path(directory), Path(root)
     while _inside(directory, root):
         if directory == root and not include_root:
             return
-        if not _rmdir_if_empty(directory) or directory == root:
+        if not _rmdir_if_empty(directory, kept_links) or directory == root:
             return
         directory = directory.parent
 
@@ -467,12 +482,13 @@ def _verify_backups(entries, backup_root):
     return bad
 
 
-def _restore(entries, created_dirs, paths):
+def _restore(entries, created_dirs, paths, kept_links=None):
     """Undo journaled targets (newest first).
 
     A target is only overwritten or deleted while it still holds exactly what the
     transaction wrote (`new_sha256`) or is absent; anything else was changed by someone
-    after the transaction and is kept and reported (Ruling R9).
+    after the transaction and is kept and reported (Ruling R9). Created directories that
+    are now links are kept and reported in kept_links.
     Returns (restored, deleted_new, kept_unexpected, failed).
     """
     restored, deleted, kept, failed = [], [], [], []
@@ -480,7 +496,8 @@ def _restore(entries, created_dirs, paths):
         path = Path(entry['path'])
         try:
             current = _read(path)
-            ours = current is not None and entry.get('new_sha256') is not None                 and _sha(current) == entry['new_sha256']
+            ours = (current is not None and entry.get('new_sha256') is not None
+                    and _sha(current) == entry['new_sha256'])
             if entry['existed']:
                 data = Path(entry['backup']).read_bytes()
                 if current == data:
@@ -500,7 +517,7 @@ def _restore(entries, created_dirs, paths):
             failed.append(entry['path'])
     for directory in sorted(created_dirs, key=lambda d: len(Path(d).parts), reverse=True):
         if _dir_allowed(directory, paths):
-            _rmdir_if_empty(directory)
+            _rmdir_if_empty(directory, kept_links)
     return restored, deleted, kept, failed
 
 
@@ -537,6 +554,12 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
                    'staging_dir': _posix(staging), 'created_dirs': created_dirs, 'targets': entries}
         atomic_write(journal_path, _json_bytes(journal))
         for target, entry in zip(targets, entries):
+            # Compare-before-write: the backup holds what _assess read. If the target changed
+            # since (another editor, a user), abort before touching it; rollback then undoes
+            # the earlier targets and this one keeps the user's bytes.
+            if _read(target.path) != target.old:
+                raise ModifiedTargetError('target changed while the transaction was running; '
+                                          'it was left as is', [_posix(target.path)])
             started += 1
             if target.action is not None:
                 target.action()
@@ -555,9 +578,9 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
     except Exception as exc:
         touched = entries[:started]
         failed = _verify_backups(touched, backup_root)  # never restore from an unverified backup
-        unexpected = []
+        unexpected, links = [], []
         if touched and not failed:
-            _, _, unexpected, failed = _restore(touched, created_dirs, paths)
+            _, _, unexpected, failed = _restore(touched, created_dirs, paths, links)
         if failed:
             raise IncompleteTransactionError(
                 f'{operation} failed ({exc}) and rollback is incomplete; journal kept at '
@@ -569,6 +592,8 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
         kept = f'; backup kept at {_posix(backup_dir)}' if backup_dir and backup_dir.exists() else ''
         if unexpected:
             kept += '; changed by someone else and left as is: ' + ', '.join(unexpected)
+        if links:
+            kept += '; linked directories left in place: ' + ', '.join(links)
         raise InstallRolledBack(f'{operation} failed and was rolled back: {exc}{kept}',
                                 backup_dir and _posix(backup_dir)) from exc
     _discard_staging(staging, backup_root)
@@ -659,8 +684,8 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
     _check_links(_infra_paths(paths), paths)
     with locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
         if not journal_path.exists():
-            return {'restored': [], 'deleted_new': [], 'kept_unexpected': [], 'journal_removed': False,
-                    'backup_dir': None}
+            return {'restored': [], 'deleted_new': [], 'kept_unexpected': [], 'kept_links': [],
+                    'journal_removed': False, 'backup_dir': None}
         journal = _load_journal(journal_path)
         entries = journal['targets']
         outside = [e['path'] for e in entries if not any(_inside(e['path'], r) for r in roots)]
@@ -671,7 +696,8 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
         bad = _verify_backups(entries, paths['backup_root'])
         if bad:
             raise RecoveryUnsafeError('backups are missing or do not match the journal; nothing restored', bad)
-        restored, deleted, unexpected, failed = _restore(entries, journal['created_dirs'], paths)
+        links = []
+        restored, deleted, unexpected, failed = _restore(entries, journal['created_dirs'], paths, links)
         if failed:
             raise IncompleteTransactionError(f'recovery incomplete; journal kept; {_RECOVER_HINT} again',
                                              failed)
@@ -680,8 +706,8 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
         if (isinstance(staging, str) and _inside(staging, paths['backup_root'])
                 and Path(staging).name.startswith('.staging-')):
             _discard_staging(Path(staging), Path(paths['backup_root']))
-    return {'restored': restored, 'deleted_new': deleted, 'kept_unexpected': unexpected, 'journal_removed': True,
-            'backup_dir': journal.get('backup_dir')}
+    return {'restored': restored, 'deleted_new': deleted, 'kept_unexpected': unexpected,
+            'kept_links': links, 'journal_removed': True, 'backup_dir': journal.get('backup_dir')}
 
 
 # --- uninstall -----------------------------------------------------------------------------
@@ -731,22 +757,23 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
             reduced = dict(manifest, files=kept_files, rules_file=None, rules_file_created=False)
             reduced = _json_bytes(reduced)
         targets.append(_Target(manifest_path, reduced, _read(manifest_path), f'skill_dir/{MANIFEST_NAME}'))
+        created_dirs = sorted((d for d in manifest['created_dirs'] if _dir_allowed(d, paths)),
+                              key=lambda d: len(Path(d).parts), reverse=True)
         result = {'dry_run': dry_run, 'removed': removed, 'kept_modified': kept, 'missing': missing,
-                  'rules_removed': rules_removed, 'backup_dir': None}
+                  'rules_removed': rules_removed, 'kept_links': [], 'backup_dir': None}
         if dry_run:
             result['journal_present'] = Path(paths['journal_file']).exists()
+            result['kept_links'] = [d for d in created_dirs if not kept and _is_link(d)]
             return result
 
         def cleanup():
             for path in removed:
                 label = 'skill_dir' if _inside(path, skill_dir) else 'agents_dir'
-                _prune(Path(path).parent, paths[label], include_root=label == 'skill_dir')
+                _prune(Path(path).parent, paths[label], label == 'skill_dir', result['kept_links'])
             if not kept:
-                _prune(skill_dir, skill_dir, include_root=True)
-                for directory in sorted(manifest['created_dirs'], key=lambda d: len(Path(d).parts),
-                                        reverse=True):
-                    if _dir_allowed(directory, paths):
-                        _rmdir_if_empty(directory)
+                _prune(skill_dir, skill_dir, True, result['kept_links'])
+                for directory in created_dirs:
+                    _rmdir_if_empty(directory, result['kept_links'])
 
         result['backup_dir'] = _transaction(paths, 'uninstall', cfg['platform'], scope, targets, [], cleanup)
     return result
