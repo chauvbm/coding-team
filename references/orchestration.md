@@ -58,7 +58,7 @@ The handoff record (`--input` JSON) needs every field below; the CLI rejects mis
 
 | Field | Content |
 | --- | --- |
-| `task_id`, `reason`, `from`, `to` | Task, why, old and new orchestrator (different, from the list above) |
+| `task_id`, `reason`, `from`, `to` | Task, why, old and new orchestrator; `from` and `to` differ and are each one of `leader-direct`, `coding-team`, `superpowers-sdd`, `superpowers-dpa`, `superpowers-executing-plans` |
 | `workers` | Every worker of the old phase as `{"id", "terminated": true, "evidence"}`. A worker still running blocks the handoff |
 | `snapshot` | `{"head", "uncommitted": [...], "untracked": [...]}` |
 | `tests` | `{"commands": [...], "result", "snapshot"}`: latest commands, result and the snapshot they ran on |
@@ -80,7 +80,7 @@ The location fails closed: only when git is missing, or git says "not a git repo
 
 Before claiming, coding-team checks:
 
-- **Unresolved SDD workspaces:** any `.superpowers/sdd/*/progress.md` in any worktree. This is unfinished progress, not a running process: it is not evidence that an SDD session is active. Result: HOLD and ask the user whether to continue SDD or hand off.
+- **Unresolved SDD workspaces:** every `.superpowers/sdd/*/progress.md` in any worktree counts, including workspaces of SDD runs that already finished: the CLI does not read the file's contents. Such a workspace is not a running process: it is not evidence that an SDD session is active. Result: HOLD and ask the user whether to continue SDD or hand off. The way past it is a user-confirmed handoff that lists those paths in `acknowledged_sdd`, or the user archiving or deleting the finished workspace.
 - **An existing record for the task** held by another session or orchestrator.
 
 If either applies, do not take the task; report it and require a handoff point. This is a coding-team-side check only; it cannot stop SDD from starting by itself.
@@ -91,10 +91,11 @@ If either applies, do not take the task; report it and require a handoff point. 
 - Updating (`claim` again with new mode/phase), handing off or releasing requires the token, or a non-null `owner_session_id` equal to the current trusted session id. The session match keeps ownership across context compaction.
 - Keep the token in the Leader's context. Never write it to any other file: not the ledger, a report, a handoff `--input` file or the rules file. Pass it with `--token`.
 - A different session without the token gets HOLD. Nothing expires automatically.
+- `claim` on a record whose orchestrator is not coding-team is refused, even for its owner: change orchestrator only through `handoff`.
 - Recovering a task from a lost session uses `takeover`, which requires `--user-confirmed` from the user's own message and a `--reason`. It issues a new token, increments `generation` and keeps the former owner in `history`.
 - `can_claim` in `status` means "claimable by a new session": it is false whenever a record for the task exists, even when you own it.
 - `release` deletes the record together with its history. Copy anything you still need into the ledger or report first.
-- Limit: the token prevents collisions between sessions that follow this process. It does not stop a process that deliberately reads the file.
+- Limit: the token prevents collisions between sessions that follow this process. It does not stop a process that deliberately reads the file. `--token` also puts the secret in argv, so it can appear in shell history and the process list.
 
 ## CLI
 

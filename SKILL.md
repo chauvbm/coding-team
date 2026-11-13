@@ -20,7 +20,7 @@ Each phase of a task has one primary orchestrator. Apply top to bottom, first ma
 | 5 | Plan exists, scope clear, sequential review suffices | SDD |
 | 6 | Small, low-impact (L0 or bounded L1) | Leader directly |
 
-File count alone is never the criterion. Without Superpowers in the session, rows 4-5 go to coding-team AUTO. To apply the table to classified facts, run `python <skill dir>/scripts/coding_team.py orchestrator route --input FACTS.json`. Routing is ADVISORY: say the choice in one line and record it. When coding-team takes a task, run `orchestrator status`, then `orchestrator claim`; keep the returned token in context only.
+File count alone is never the criterion. Without Superpowers in the session, rows 4-5 go to coding-team AUTO. To apply the table to classified facts, run `python <skill dir>/scripts/coding_team.py orchestrator route --input FACTS.json`. Routing is ADVISORY: say the choice in one line and report it in the final answer or ledger. When coding-team takes a task, run `orchestrator status`, then `orchestrator claim`; keep the returned token in context only.
 
 ## Levels
 
@@ -62,7 +62,7 @@ Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `
 
 Before dispatch, read [agent contracts](references/agent-contracts.md), [model routing](references/model-routing.md) and [numeric defaults](references/governance-defaults.json). Tiers: default tiers come from the installed `platforms/<platform>.json`; Leader may raise or lower them. Guarantees: report ENFORCED/ADVISORY honestly; never present ADVISORY as a guarantee.
 
-**No nested delegation**: workers never dispatch, spawn or define agents, and never start another agent or AI CLI through a shell. Capacity is `max_subagents` excluding Leader, limited by runtime and user limits. Give each file one writer; keep first reviews independent and route findings through Leader. Do not change global settings or relax permissions to obtain agents.
+**No nested delegation**: workers never dispatch, spawn or define agents, and never start another agent or AI CLI through a shell. Capacity is `max_subagents` excluding Leader, limited by runtime and user limits; start small when capacity is unknown. Rejected spawns do not count as participation. Give each file one writer; keep first reviews independent and route findings through Leader. Do not change global settings or relax permissions to obtain agents.
 
 ## Gates and disagreement
 
@@ -70,8 +70,8 @@ Read [debate governance](references/debate-governance.md) for full-team plan rev
 
 At L3, Gate 2 also requires a complete `ct-security` report bound to the same snapshot, checked by `ct-reviewer`, with no unresolved BLOCKER/MAJOR, unless a valid user exception is recorded.
 
-Keep cumulative counters and findings across workers, retries and compaction. Use the [optional ledger](references/task-ledger.md) when context-only accounting is fragile; it validates records, not authority.
+Keep cumulative counters and findings across workers, retries and compaction; do not reset counters by renaming issues or changing executors. Use the [optional ledger](references/task-ledger.md) when context-only accounting is fragile; it validates records, not authority.
 
 ## Verify and finish
 
-Preserve workspace changes. Verify the stable integrated result, including uncommitted and untracked files. Self-review is never independent QA. Never fabricate participation, consensus, model metadata or results. Report actual checks, outcomes, effective models (or `unverified`) and limits in the user's language. Skill rules are behavioral guidance, not runtime locks.
+Preserve workspace changes. Verify the stable integrated result, including uncommitted and untracked files. Without agents, continue feasible authorized work only where required independent review or gates do not block it. Self-review is never independent QA. Never fabricate participation, consensus, model metadata or results. Report actual checks, outcomes, effective models (or `unverified`) and limits in the user's language. Skill rules are behavioral guidance, not runtime locks.

@@ -29,11 +29,11 @@ This decides whether the tier's model is written into the static agent file:
 
 Priority, highest first:
 
-1. A user-pinned model, or STRICT_MODEL.
+1. A user-pinned model, or STRICT_MODEL. A configured preference is not a pin unless the user requires it or STRICT_MODEL applies.
 2. A Leader choice for this specific task, with a stated reason.
 3. The role's Preferred Tier.
 
-The Leader may raise or lower the tier by difficulty: lighter for bounded investigation or mechanical work, stronger for hard design, debugging, security, integrity or concurrency risk. Escalation rule: when a `ct-developer` fix fails after one repair round, the next repair attempt uses a higher tier. Tool or credential failure alone is not a reason for a stronger model. Skip delegation when direct work is more efficient.
+The Leader may raise or lower the tier by difficulty: lighter for bounded investigation or mechanical work, stronger for hard design, debugging, security, integrity or concurrency risk. Escalation rule: when a `ct-developer` fix fails after one repair round, the next repair attempt uses a higher tier. Raise effort for a concrete unresolved reasoning problem; tool or credential failure alone is not a reason to select a stronger model. Skip delegation when direct work is more efficient.
 
 Pass model and effort through the platform's structured dispatch fields. Naming a model in a prompt does not select it. Do not edit runtime or global configuration to make a preference work.
 
