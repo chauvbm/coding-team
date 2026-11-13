@@ -18,7 +18,7 @@ import sys
 
 import ct_policy
 import ct_rules
-from ct_platform import target_paths
+from ct_platform import resolve_config_root, target_paths
 from ct_roles import load_roles, render_all
 from ct_storage import LinkedPathError, atomic_write, locked, reject_links
 
@@ -122,10 +122,19 @@ def _inside(path, root):
     return path == root or root in path.parents
 
 
-def _stop_at(path, roots):
-    """Deepest managed root containing path (link checks stop there, inclusive)."""
+def _stop_at(path, paths):
+    """Where link checks stop (inclusive), Ruling R7.
+
+    Links at or above the config root are the user's chosen location and allowed; under
+    the config root checks stop at the first component strictly below it. Paths outside
+    the config root (Codex skill dir, project scope) stop at their deepest managed root.
+    """
+    path = Path(os.path.abspath(path))
+    base = Path(os.path.abspath(paths['config_root']))
+    if base in path.parents:
+        return base / path.relative_to(base).parts[0]
     best = None
-    for root in roots:
+    for root in paths['managed_roots']:
         root = Path(os.path.abspath(root))
         if _inside(path, root) and (best is None or len(root.parts) > len(best.parts)):
             best = root
@@ -134,9 +143,26 @@ def _stop_at(path, roots):
     return best
 
 
-def _check_links(paths_list, roots):
+def _check_links(paths_list, paths):
     for path in paths_list:
-        reject_links(path, _stop_at(path, roots))
+        reject_links(path, _stop_at(path, paths))
+
+
+def _linked(paths_list, paths):
+    """Read-only variant of _check_links: the linked paths, in order."""
+    found = []
+    for path in paths_list:
+        try:
+            _check_links([path], paths)
+        except LinkedPathError:
+            found.append(_posix(path))
+    return found
+
+
+def _resolve_paths(cfg, scope, env, home, project_dir):
+    paths = dict(target_paths(cfg, scope, env, home, project_dir))
+    paths['config_root'] = resolve_config_root(cfg, env, Path(home))
+    return paths
 
 
 def _write_new(path, data):
@@ -241,7 +267,7 @@ def build_plan(source_root, cfg, *, scope, env, home, project_dir=None, default=
         raise ValueError('--docs-mcp is only supported on claude-code')
     if default is not None and str(default).upper() not in ('ON', 'OFF'):
         raise ValueError('default must be on or off')
-    paths = target_paths(cfg, scope, env, home, project_dir)
+    paths = _resolve_paths(cfg, scope, env, home, project_dir)
     source_root = Path(source_root)
     roles = load_roles(source_root / 'agents' / 'roles')
     agents = render_all(roles, cfg, {'docs_lookup': docs_mcp} if docs_mcp else None)
@@ -299,7 +325,7 @@ def _journal_guard(paths):
 # --- assessment (read-only) ----------------------------------------------------------------
 
 def _assess(plan):
-    paths, roots = plan.paths, plan.paths['managed_roots']
+    paths = plan.paths
     skill_dir = Path(paths['skill_dir'])
     manifest = _load_manifest(skill_dir)
     if manifest:
@@ -310,12 +336,9 @@ def _assess(plan):
          'conflicts': {'unmanaged': [], 'modified': [], 'linked': []}}
 
     def linked(path):
-        try:
-            _check_links([path], roots)
-            return False
-        except LinkedPathError:
-            r['conflicts']['linked'].append(_posix(path))
-            return True
+        found = _linked([path], paths)
+        r['conflicts']['linked'] += found
+        return bool(found)
 
     new_files = {label: {} for label in ROOT_LABELS}
     for label, rel, data in plan.files:
@@ -404,6 +427,8 @@ def preview(plan) -> dict:
     """Read-only report of what apply_plan would do if every conflict were permitted."""
     r = _assess(plan)
     targets = r['targets']
+    linked = r['conflicts']['linked']
+    r['conflicts']['linked'] = list(dict.fromkeys(_linked(_plan_link_set(plan), plan.paths) + linked))
     return {
         'would_write': [_posix(t.path) for t in targets if t.data is not None or t.action],
         'would_backup': [_posix(t.path) for t in targets if t.old is not None],
@@ -443,17 +468,32 @@ def _verify_backups(entries, backup_root):
 
 
 def _restore(entries, created_dirs, paths):
-    """Undo journaled targets (newest first); return (restored, deleted_new, failed)."""
-    restored, deleted, failed = [], [], []
+    """Undo journaled targets (newest first).
+
+    A target is only overwritten or deleted while it still holds exactly what the
+    transaction wrote (`new_sha256`) or is absent; anything else was changed by someone
+    after the transaction and is kept and reported (Ruling R9).
+    Returns (restored, deleted_new, kept_unexpected, failed).
+    """
+    restored, deleted, kept, failed = [], [], [], []
     for entry in reversed(entries):
         path = Path(entry['path'])
         try:
+            current = _read(path)
+            ours = current is not None and entry.get('new_sha256') is not None                 and _sha(current) == entry['new_sha256']
             if entry['existed']:
                 data = Path(entry['backup']).read_bytes()
-                if _read(path) != data:
-                    atomic_write(path, data)
-                    restored.append(entry['path'])
-            elif os.path.lexists(path):
+                if current == data:
+                    continue
+                if current is not None and not ours:
+                    kept.append(entry['path'])
+                    continue
+                atomic_write(path, data)
+                restored.append(entry['path'])
+            elif current is not None:
+                if not ours:
+                    kept.append(entry['path'])
+                    continue
                 path.unlink()
                 deleted.append(entry['path'])
         except Exception:  # keep going; the journal stays for a later recover
@@ -461,7 +501,7 @@ def _restore(entries, created_dirs, paths):
     for directory in sorted(created_dirs, key=lambda d: len(Path(d).parts), reverse=True):
         if _dir_allowed(directory, paths):
             _rmdir_if_empty(directory)
-    return restored, deleted, failed
+    return restored, deleted, kept, failed
 
 
 def _discard_staging(staging, backup_root):
@@ -483,7 +523,8 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
             if target.data is not None:
                 _write_new(staging / f'{index:04d}', target.data)
             entry = {'path': _posix(target.path), 'existed': target.old is not None,
-                     'backup': None, 'backup_sha256': None}
+                     'backup': None, 'backup_sha256': None,
+                     'new_sha256': None if target.data is None else _sha(target.data)}
             if target.old is not None:
                 backup = backup_dir / target.label
                 _write_new(backup, target.old)
@@ -495,10 +536,15 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
                    'started_at': _now(), 'backup_dir': backup_dir and _posix(backup_dir),
                    'staging_dir': _posix(staging), 'created_dirs': created_dirs, 'targets': entries}
         atomic_write(journal_path, _json_bytes(journal))
-        for target in targets:
+        for target, entry in zip(targets, entries):
             started += 1
             if target.action is not None:
                 target.action()
+                # The action's bytes are only known now; journal them so a rollback or
+                # recover may undo them (until then they are treated as unexpected and kept).
+                after = _read(target.path)
+                entry['new_sha256'] = None if after is None else _sha(after)
+                atomic_write(journal_path, _json_bytes(journal))
             elif target.data is not None:
                 atomic_write(target.path, target.data)
             elif os.path.lexists(target.path):
@@ -509,8 +555,9 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
     except Exception as exc:
         touched = entries[:started]
         failed = _verify_backups(touched, backup_root)  # never restore from an unverified backup
+        unexpected = []
         if touched and not failed:
-            failed = _restore(touched, created_dirs, paths)[2]
+            _, _, unexpected, failed = _restore(touched, created_dirs, paths)
         if failed:
             raise IncompleteTransactionError(
                 f'{operation} failed ({exc}) and rollback is incomplete; journal kept at '
@@ -520,28 +567,37 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
         finally:
             _discard_staging(staging, backup_root)
         kept = f'; backup kept at {_posix(backup_dir)}' if backup_dir and backup_dir.exists() else ''
+        if unexpected:
+            kept += '; changed by someone else and left as is: ' + ', '.join(unexpected)
         raise InstallRolledBack(f'{operation} failed and was rolled back: {exc}{kept}',
                                 backup_dir and _posix(backup_dir)) from exc
     _discard_staging(staging, backup_root)
     return backup_dir and _posix(backup_dir)
 
 
-def _infra_paths(paths):
-    items = [paths['lock_file'], paths['journal_file'], paths['backup_root'], paths['state_file'],
+def _infra_paths(paths, *, rules=False, state=False):
+    """Paths a transaction touches besides plan files; rules/state only when written (R7)."""
+    items = [paths['lock_file'], paths['journal_file'], paths['backup_root'],
              Path(paths['skill_dir']) / MANIFEST_NAME]
-    if paths['global_rules_file'] is not None:
+    if state:
+        items.append(paths['state_file'])
+    if rules and paths['global_rules_file'] is not None:
         items.append(paths['global_rules_file'])
     return items
+
+
+def _plan_link_set(plan):
+    dests = [Path(plan.paths[label]) / rel for label, rel, _ in plan.files]
+    return _infra_paths(plan.paths, rules=plan.rules_block is not None, state=plan.scope == 'user') + dests
 
 
 def apply_plan(plan, *, dry_run, replace_unmanaged=False, overwrite_modified=False) -> dict:
     if dry_run:
         return dict(preview(plan), dry_run=True)
-    paths, roots = plan.paths, plan.paths['managed_roots']
-    dests = [Path(paths[label]) / rel for label, rel, _ in plan.files]
-    _check_links(_infra_paths(paths) + dests, roots)
+    paths = plan.paths
+    _check_links(_plan_link_set(plan), paths)
     with locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
-        _check_links(_infra_paths(paths) + dests, roots)
+        _check_links(_plan_link_set(plan), paths)
         _journal_guard(paths)
         r = _assess(plan)
         conflicts = r['conflicts']
@@ -587,6 +643,8 @@ def _load_journal(path):
         for entry in journal['targets']:
             _require(isinstance(entry, dict) and isinstance(entry.get('path'), str)
                      and isinstance(entry.get('existed'), bool), 'bad target entry')
+            digest = entry.get('new_sha256')
+            _require(digest is None or (isinstance(digest, str) and _SHA.fullmatch(digest)), 'bad new_sha256')
         _require(all(isinstance(d, str) for d in journal['created_dirs']), 'bad created_dirs')
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         raise RecoveryUnsafeError(f'install journal is unreadable ({exc}); inspect it manually',
@@ -596,23 +654,24 @@ def _load_journal(path):
 
 def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
     """Restore every journaled target from verified backups, then drop journal and staging."""
-    paths = target_paths(cfg, scope, env, home, project_dir)
+    paths = _resolve_paths(cfg, scope, env, home, project_dir)
     roots, journal_path = paths['managed_roots'], Path(paths['journal_file'])
-    _check_links(_infra_paths(paths), roots)
+    _check_links(_infra_paths(paths), paths)
     with locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
         if not journal_path.exists():
-            return {'restored': [], 'deleted_new': [], 'journal_removed': False, 'backup_dir': None}
+            return {'restored': [], 'deleted_new': [], 'kept_unexpected': [], 'journal_removed': False,
+                    'backup_dir': None}
         journal = _load_journal(journal_path)
         entries = journal['targets']
         outside = [e['path'] for e in entries if not any(_inside(e['path'], r) for r in roots)]
         if outside:
             raise RecoveryUnsafeError('journal targets are outside the managed roots of this '
                                       'platform/scope; rerun with the matching --scope/--project-dir', outside)
-        _check_links([e['path'] for e in entries], roots)
+        _check_links([e['path'] for e in entries], paths)
         bad = _verify_backups(entries, paths['backup_root'])
         if bad:
             raise RecoveryUnsafeError('backups are missing or do not match the journal; nothing restored', bad)
-        restored, deleted, failed = _restore(entries, journal['created_dirs'], paths)
+        restored, deleted, unexpected, failed = _restore(entries, journal['created_dirs'], paths)
         if failed:
             raise IncompleteTransactionError(f'recovery incomplete; journal kept; {_RECOVER_HINT} again',
                                              failed)
@@ -621,17 +680,17 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
         if (isinstance(staging, str) and _inside(staging, paths['backup_root'])
                 and Path(staging).name.startswith('.staging-')):
             _discard_staging(Path(staging), Path(paths['backup_root']))
-    return {'restored': restored, 'deleted_new': deleted, 'journal_removed': True,
+    return {'restored': restored, 'deleted_new': deleted, 'kept_unexpected': unexpected, 'journal_removed': True,
             'backup_dir': journal.get('backup_dir')}
 
 
 # --- uninstall -----------------------------------------------------------------------------
 
 def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_modified=False) -> dict:
-    paths = target_paths(cfg, scope, env, home, project_dir)
-    roots, skill_dir = paths['managed_roots'], Path(paths['skill_dir'])
+    paths = _resolve_paths(cfg, scope, env, home, project_dir)
+    skill_dir = Path(paths['skill_dir'])
     if not dry_run:
-        _check_links(_infra_paths(paths), roots)
+        _check_links(_infra_paths(paths), paths)
     with nullcontext() if dry_run else locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
         if not dry_run:
             _journal_guard(paths)
@@ -644,7 +703,7 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
         for label in ROOT_LABELS:
             for rel, digest in manifest['files'].get(label, {}).items():
                 dest = Path(paths[label]) / rel
-                _check_links([dest], roots)
+                _check_links([dest], paths)
                 old = _read(dest)
                 if old is None:
                     missing.append(_posix(dest))
@@ -658,7 +717,7 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
         rules = manifest.get('rules_file')
         if rules and paths['global_rules_file'] is not None and _posix(paths['global_rules_file']) == rules:
             rules_path = Path(paths['global_rules_file'])
-            _check_links([rules_path], roots)
+            _check_links([rules_path], paths)
             old = _read(rules_path)
             new = _rules_without(old) if old is not None else old
             if new != old:

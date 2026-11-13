@@ -321,6 +321,55 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(self.paths()['skill_dir'].exists())
         self.assertFalse(self.paths()['state_file'].parent.exists())
 
+    def test_links_at_or_above_config_root_allowed(self):
+        real = self.tmp / 'real claude'
+        real.mkdir()
+        self.make_link(self.home / '.claude', real)
+        for rules in (False, True):
+            with self.subTest(global_rules=rules):
+                plan = self.plan('claude-code', global_rules=rules)
+                self.assertEqual(ct_install.preview(plan)['conflicts']['linked'], [])
+                self.apply(plan)
+                self.assertTrue((real / 'skills/coding-team/SKILL.md').is_file())
+                self.assertTrue((real / 'agents/ct-architect.md').is_file())
+                self.assertTrue((real / 'coding-team/state.json').is_file())
+                self.assertEqual((real / 'CLAUDE.md').is_file(), rules)
+        self.uninstall()
+        self.assertFalse((real / 'CLAUDE.md').exists())
+        self.assertFalse((real / 'skills/coding-team').exists())
+
+    def test_links_below_config_root_refused(self):
+        for case in ('agents', 'skills', 'coding-team'):
+            with self.subTest(link=case):
+                self.home = self.tmp / f'home-{case}'
+                outside = self.tmp / f'outside-{case}'
+                outside.mkdir()
+                (self.home / '.claude').mkdir(parents=True)
+                self.make_link(self.home / '.claude' / case, outside)
+                plan = self.plan('claude-code')
+                self.assertTrue(ct_install.preview(plan)['conflicts']['linked'])
+                with self.assertRaises(LinkedPathError):
+                    self.apply(plan, replace_unmanaged=True, overwrite_modified=True)
+                self.assertEqual(list(outside.iterdir()), [])
+
+    def test_linked_rules_file_refused_only_with_global_rules(self):
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        rules = self.paths()['global_rules_file']
+        rules.parent.mkdir(parents=True)
+        self.make_link(rules, outside)  # a directory junction named CLAUDE.md stands in for a linked file
+        plan = self.plan('claude-code', global_rules=True)
+        self.assertIn(rules.as_posix(), ct_install.preview(plan)['conflicts']['linked'])
+        with self.assertRaises(LinkedPathError):
+            self.apply(plan)
+        self.assertFalse(self.paths()['skill_dir'].exists())
+        plan = self.plan('claude-code')
+        self.assertEqual(ct_install.preview(plan)['conflicts']['linked'], [])
+        self.apply(plan)
+        self.assertTrue((self.paths()['skill_dir'] / 'SKILL.md').is_file())
+        self.uninstall()
+        self.assertEqual(list(outside.iterdir()), [])
+
     def test_rollback_on_exception(self):
         src = self.copy_source()
         self.install('claude-code', source=src, global_rules=True)
@@ -402,13 +451,18 @@ class InstallTests(unittest.TestCase):
             self.recover()
         self.assertEqual(journal.read_bytes(), b'{broken')
 
-    def killed_install(self):
+    def killed_install(self, new_reference=False):
+        """Second install killed at its 2nd plan-file write; the 1st write is SKILL.md (an
+        upgrade) or, with new_reference, a brand-new references/aaa-new.md."""
         src = self.copy_source()
         self.install('claude-code', source=src, global_rules=True)
         before = snapshot(self.home, exclude=[self.paths()['backup_root']])
         role = src / 'agents/roles/ct-architect.md'
         role.write_bytes(role.read_bytes() + b'\nKilled version.\n')
-        (src / 'SKILL.md').write_bytes((src / 'SKILL.md').read_bytes() + b'\nKilled version.\n')
+        if new_reference:
+            (src / 'references/aaa-new.md').write_bytes(b'new reference\n')
+        else:
+            (src / 'SKILL.md').write_bytes((src / 'SKILL.md').read_bytes() + b'\nKilled version.\n')
         args = {'scripts': str(SCRIPTS), 'platform': 'claude-code', 'source': str(src), 'home': str(self.home)}
         result = subprocess.run([sys.executable, '-c', KILL_SCRIPT, json.dumps(args)],
                                 capture_output=True, text=True, timeout=120)
@@ -434,6 +488,33 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.recover()['journal_removed'], False)
         final = self.apply(plan)
         self.assertTrue(final['written'])
+
+    def test_recover_deletes_new_file_only_if_unchanged(self):
+        self.killed_install(new_reference=True)
+        new = self.paths()['skill_dir'] / 'references/aaa-new.md'
+        self.assertEqual(new.read_bytes(), b'new reference\n')
+        result = self.recover()
+        self.assertEqual(result['deleted_new'], [new.as_posix()])
+        self.assertEqual(result['kept_unexpected'], [])
+        self.assertFalse(new.exists())
+
+    def test_recover_keeps_new_file_created_by_user_after_crash(self):
+        self.killed_install(new_reference=True)
+        new = self.paths()['skill_dir'] / 'references/aaa-new.md'
+        new.write_bytes(b'user wrote this after the crash\n')
+        result = self.recover()
+        self.assertEqual(result['kept_unexpected'], [new.as_posix()])
+        self.assertEqual(result['deleted_new'], [])
+        self.assertTrue(result['journal_removed'])
+        self.assertEqual(new.read_bytes(), b'user wrote this after the crash\n')
+
+    def test_recover_keeps_existing_file_edited_after_crash(self):
+        self.killed_install()
+        skill = self.paths()['skill_dir'] / 'SKILL.md'
+        skill.write_bytes(b'user edit after crash\n')
+        result = self.recover()
+        self.assertEqual(result['kept_unexpected'], [skill.as_posix()])
+        self.assertEqual(skill.read_bytes(), b'user edit after crash\n')
 
     def test_recover_refuses_tampered_backup(self):
         self.killed_install()
