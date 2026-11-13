@@ -91,16 +91,56 @@ class StorageTests(unittest.TestCase):
         with ct_storage.locked(self.state, timeout=.1):
             pass
 
-    def test_reject_links_symlink_ancestor(self):
-        real = self.root / 'real'
-        real.mkdir()
-        link = self.root / 'link'
+    def make_link(self, link, real):
+        """Junction on Windows (no privilege needed), symlink elsewhere; skip if neither works."""
+        link = Path(link)
+        if os.name == 'nt':
+            result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(real)],
+                                    capture_output=True, text=True)
+            if result.returncode != 0:
+                self.skipTest('junctions unavailable: ' + result.stderr)
+            self.addCleanup(lambda: subprocess.run(['cmd', '/c', 'rmdir', str(link)], capture_output=True))
+            return
         try:
             os.symlink(real, link, target_is_directory=True)
         except (OSError, NotImplementedError):
             self.skipTest('symlinks unavailable')
+
+    def test_reject_links_symlink_ancestor(self):
+        real = self.root / 'real'
+        real.mkdir()
+        self.make_link(self.root / 'link', real)
         with self.assertRaises(ct_storage.LinkedPathError):
-            ct_storage.reject_links(link / 'file.txt', self.root)
+            ct_storage.reject_links(self.root / 'link' / 'file.txt', self.root)
+
+    def test_reject_links_junction_ancestor(self):
+        if os.name != 'nt':
+            self.skipTest('Windows only')
+        real = self.root / 'real'
+        (real / 'sub').mkdir(parents=True)
+        self.make_link(self.root / 'jn', real)
+        with self.assertRaises(ct_storage.LinkedPathError):
+            ct_storage.reject_links(self.root / 'jn' / 'sub' / 'file.txt', self.root)
+
+    def test_reject_links_linked_path_itself(self):
+        real = self.root / 'real'
+        real.mkdir()
+        self.make_link(self.root / 'link', real)
+        with self.assertRaises(ct_storage.LinkedPathError):
+            ct_storage.reject_links(self.root / 'link', self.root)
+
+    def test_reject_links_linked_stop_at(self):
+        real = self.root / 'real'
+        (real / 'sub').mkdir(parents=True)
+        self.make_link(self.root / 'link', real)
+        with self.assertRaises(ct_storage.LinkedPathError):
+            ct_storage.reject_links(self.root / 'link' / 'sub' / 'f.txt', self.root / 'link')
+
+    def test_reject_links_path_not_under_stop_at(self):
+        other = self.root / 'other'
+        other.mkdir()
+        with self.assertRaises(ct_storage.LinkedPathError):
+            ct_storage.reject_links(other / 'f.txt', self.root / 'elsewhere')
 
     def test_reject_links_accepts_plain_and_missing_paths(self):
         plain = self.root / 'a' / 'b'
