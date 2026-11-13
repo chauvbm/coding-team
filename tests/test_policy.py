@@ -84,6 +84,22 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(policy.apply_command(self.state, '/coding-team status', 'a')['effective_policy'], value.upper())
         self.assertEqual(policy.apply_command(self.state, '/coding-team status', 'a')['chat_policy'], 'INHERIT')
 
+    def test_chat_precedence_mixed_on_and_off_overrides(self):
+        policy.initialize_state(self.state)
+        policy.apply_command(self.state, '/coding-team off', 'one')
+        policy.apply_command(self.state, '$coding-team on', 'two')
+        for value in ('off', 'on'):
+            policy.apply_command(self.state, '/coding-team ' + value + ' --global', None)
+            self.assertEqual(policy.load_state(self.state)['chat_policies'], {'one': 'OFF', 'two': 'ON'})
+            status = lambda chat: policy.apply_command(self.state, '/coding-team status', chat)
+            self.assertEqual(status('one')['effective_policy'], 'OFF')
+            self.assertEqual(status('two')['effective_policy'], 'ON')
+            self.assertEqual(status('three')['effective_policy'], value.upper())
+            self.assertEqual(status('three')['chat_policy'], 'INHERIT')
+        policy.apply_command(self.state, '/coding-team reset', 'one')
+        self.assertEqual(policy.load_state(self.state)['chat_policies'], {'two': 'ON'})
+        self.assertEqual(policy.apply_command(self.state, '/coding-team status', 'one')['chat_policy'], 'INHERIT')
+
     def test_status_unknown_and_noop_do_not_write(self):
         policy.initialize_state(self.state)
         before = self.state.read_bytes()
