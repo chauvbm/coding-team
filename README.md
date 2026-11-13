@@ -14,7 +14,7 @@ Always preview first: `install --dry-run` lists every path it would write, back 
 
 - `--default on|off` sets the global ON/OFF default (state is user-level). Without it, existing state is kept; a new state starts ON.
 - `--global-rules` writes a marked block (`<!-- coding-team-policy:start -->` ... `<!-- coding-team-policy:end -->`) into the platform's global rules file so the Leader handles `/coding-team` controls and routing even before selecting the skill. Bytes outside the markers are never changed.
-- `--scope project --project-dir DIR` installs only the skill and agents into one project. It cannot be combined with `--default` or `--global-rules`; the ON/OFF state stays user-level.
+- `--scope project --project-dir DIR` installs only the skill and agents into one project, plus lock and backup directories under the user config root (`<config_root>/coding-team/`). It touches no state file or rules file and cannot be combined with `--default` or `--global-rules`; the ON/OFF state stays user-level.
 
 Every CLI call prints exactly one JSON object; exit 0 = success, 1 = valid but negative, 2 = error or conflict. Start a fresh chat after installing so the platform loads the new skill and agents. The examples use `python`; use your actual interpreter (for example `python3`), and in PowerShell quote paths with spaces and use the call operator (`& 'C:\path\python.exe' 'C:\src\coding-team\scripts\coding_team.py' ...`).
 
@@ -61,7 +61,7 @@ python ~/src/coding-team/scripts/coding_team.py install --platform antigravity -
 
 ### Runtime-only package
 
-Instead of installing from a full clone, a maintainer can build a smaller ZIP with `python scripts/build_runtime_package.py [--platform P] --output ../coding-team.zip`. It contains `LICENSE`, `SKILL.md`, `agents`, `platforms` (only `platforms/P.json` with `--platform`), `references` and `scripts`, plus a hash manifest, under `coding-team/`. Extract it into a staging directory and run the same `install` commands with the extracted `coding-team/scripts/coding_team.py`. See [runtime packaging](CONTRIBUTING.md#runtime-only-installation-package).
+Instead of installing from a full clone, a maintainer can build a smaller ZIP with `python scripts/build_runtime_package.py [--platform P] --output ../coding-team.zip`. It contains `LICENSE`, `SKILL.md`, `agents`, `platforms` (only `platforms/P.json` with `--platform`), `references` and `scripts`, plus a hash manifest, under `coding-team/`. Extract it into a staging directory and run the same `install` commands with the extracted `coding-team/scripts/coding_team.py`. A package built with `--platform P` can install only platform P; installing another platform from it fails because `platforms/<other>.json` is missing. See [runtime packaging](CONTRIBUTING.md#runtime-only-installation-package).
 
 ### Conflicts, recovery and uninstall
 
@@ -100,7 +100,7 @@ The previous release was a Codex-only git clone in `~/.agents/skills/coding-team
 - **The old rules block is replaced.** `--global-rules` reuses the same markers in `AGENTS.md`, so the old block (which still lists the old commands) is replaced by the new one; bytes outside the markers are unchanged.
 - **Old state is kept.** State schema v1 is unchanged, so existing global and per-chat ON/OFF settings keep working.
 - **Old commands are rejected with a hint:** `/coding team on` / `/coding team off` become `/coding-team on` / `off`; `/coding team on all` / `/coding team off all` become `on --global` / `off --global`; `/coding team status` becomes `/coding-team status`; `/coding team inherit` becomes `/coding-team reset`.
-- `scripts/coding_team_policy.py` and `scripts/check_model_profiles.py` were replaced by `scripts/coding_team.py`; `references/model-profiles.json` was replaced by `platforms/<platform>.json`.
+- `scripts/coding_team_policy.py` and `scripts/check_model_profiles.py` are superseded by `scripts/coding_team.py` (the old files remain in an unmoved clone); `references/model-profiles.json` is superseded by `platforms/<platform>.json`.
 <!-- /legacy-migration -->
 
 ## Commands
@@ -151,7 +151,7 @@ Each task phase has exactly one primary orchestrator. First match wins; an expli
 5. Plan exists, scope clear, sequential review suffices: Superpowers subagent-driven-development.
 6. Small, low-impact (L0 or bounded L1): the Leader works directly.
 
-File count alone is never the criterion. Without Superpowers in the session, rows 4 and 5 go to coding-team AUTO. `orchestrator route --input FACTS.json` applies the table deterministically to facts the Leader classified; `orchestrator status|claim|handoff|takeover|release` keep per-repository ownership in `<main worktree>/.coding-team/orchestration.json`. Routing remains ADVISORY: nothing prevents another orchestrator from starting by itself. Details, handoff records and owner tokens: [orchestration](references/orchestration.md).
+An L2 task that matches no earlier condition goes to coding-team. File count alone is never the criterion. Without Superpowers in the session, rows 4 and 5 go to coding-team AUTO. `orchestrator route --input FACTS.json` applies the table deterministically to facts the Leader classified; `orchestrator status|claim|handoff|takeover|release` keep per-repository ownership in `<main worktree>/.coding-team/orchestration.json`. Routing remains ADVISORY: nothing prevents another orchestrator from starting by itself. Details, handoff records and owner tokens: [orchestration](references/orchestration.md).
 
 ## Verified platforms
 

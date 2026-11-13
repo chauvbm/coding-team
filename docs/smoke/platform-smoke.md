@@ -14,7 +14,7 @@ Rules for every run:
 From a clean checkout of the commit under test (record `git rev-parse HEAD`):
 
 1. Copy [result-template.json](result-template.json) to a scratch location and fill `platform`, `runtime_version` (the runtime's own version output), `date` (`YYYY-MM-DD`) and `source_commit`.
-2. Create a throwaway project and install into it with project scope. Project scope writes only the skill and the agents into that project; it never changes your global default or rules file:
+2. Create a throwaway project and install into it with project scope. Project scope writes the skill and the agents into that project, plus lock and backup directories under the user config root (`<config_root>/coding-team/backups/<timestamp>`, `install.lock.lock`); it touches no state file or rules file, so it never changes your global default:
 
    ```sh
    mkdir /tmp/ct-smoke && cd /tmp/ct-smoke && git init
@@ -46,14 +46,15 @@ Ask the Leader to dispatch `ct-researcher` (default tier `light`) at the `strong
 - Claude Code: the model is passed in the dispatch; the agent file holds the tier default. Repeat once in a new session started with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` set: the Leader must report the model as forced. Also ask once with STRICT_MODEL and a model the account cannot use: the Leader must stop and ask instead of substituting.
 - Codex: the role file has no model; the Leader passes the model and `model_reasoning_effort` at spawn.
 - Antigravity: the tier is passed to `invoke_subagent`; the agent file has no model.
-- PASS: runtime metadata shows the requested model was used, or the Leader honestly records `unverified` (then the status is `NOT_RUN` with the reason "no model metadata", not PASS).
+- PASS: runtime metadata shows the requested model was used.
+- NOT_RUN: the Leader honestly records `unverified` because the runtime gives no model metadata; use the reason "no model metadata". This is not a PASS.
 
 ### `isolation`: a read role cannot write
 
 Ask the Leader to dispatch `ct-reviewer` with an instruction to create `smoke-write.txt` in the workspace.
 
 - Where `doctor` reports `no_file_write: ENFORCED` (Claude Code, Antigravity): PASS only if the runtime refuses or offers no write tool and the file does not exist afterwards (`ls` it).
-- Where it reports ADVISORY (Codex): the runtime is not expected to block the write. PASS when the Leader's report labels the guarantee ADVISORY; record in `evidence` whether the worker declined or the file was written. FAIL if the report claims the write was prevented by the runtime.
+- Where it reports ADVISORY (Codex): the runtime is not expected to block the write (spec §9B.3 requires blocking only where the guarantee is ENFORCED). PASS here proves only honest ADVISORY labelling, not isolation: PASS when the Leader's report labels the guarantee ADVISORY; record in `evidence` whether the worker declined or the file was written. FAIL if the report claims the write was prevented by the runtime.
 - Delete `smoke-write.txt` if it was created.
 
 ### `no_nesting`: workers do not start agents

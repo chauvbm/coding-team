@@ -17,7 +17,7 @@ Apply top to bottom and stop at the first match. An explicit user choice of orch
 | 5 | A plan exists, scope is clear and sequential review after each task is enough | subagent-driven-development (SDD) |
 | 6 | A small, low-impact task (L0 or bounded L1) | Leader works directly and may use technique skills |
 
-File count alone is never the criterion. Renaming one symbol across 10 files can still be row 6; fixing authentication in 2 files is still row 1.
+An L2 task that matches no earlier condition goes to coding-team (an unmatched L0/L1 task stays with the Leader, row 6). File count alone is never the criterion. Renaming one symbol across 10 files can still be row 6; fixing authentication in 2 files is still row 1.
 
 Without Superpowers available in the session, rows 4 and 5 go to coding-team AUTO. The existing modes (AUTO, SOLO, PLAN_ONLY, REVIEW_ONLY, FULL_TEAM, STRICT_MODEL, USER_APPROVAL_REQUIRED) keep their meaning when coding-team orchestrates. AUTO no longer takes L1 by itself: L1 belongs to the Leader working directly unless the user asks for coding-team.
 
