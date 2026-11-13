@@ -64,7 +64,7 @@ def upsert_block(path: Path, block: str) -> bool:
         if found:
             updated = original[:found[0]] + payload + original[found[1]:]
         else:
-            sep = b'' if not original else b'\n' if original.endswith(b'\n') else b'\n\n'
+            sep = b'\n' if original else b''
             updated = original + sep + payload + b'\n'
         if updated == original:
             return False

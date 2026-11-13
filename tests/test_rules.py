@@ -72,10 +72,14 @@ class RulesTests(unittest.TestCase):
     def test_remove_block_preserves_rest(self):
         agents = self.root / 'CLAUDE.md'
         self.assertFalse(ct_rules.remove_block(agents))
-        for original in (b'', b'# one\n', b'\xef\xbb\xbf# a\r\n\xff\r\n', b'x\n\n\n'):
+        for original in (b'', b'# one\n', b'\xef\xbb\xbf# a\r\n\xff\r\n', b'x\n\n\n',
+                         b'unrelated', b'a\r\nb', b'a\r\nb\r\n', b'\xef\xbb\xbf# t\r\n\xff'):
             with self.subTest(original=original):
                 agents.write_bytes(original)
                 ct_rules.upsert_block(agents, self.block())
+                inserted = agents.read_bytes()
+                self.assertFalse(ct_rules.upsert_block(agents, self.block()))
+                self.assertEqual(agents.read_bytes(), inserted)
                 self.assertTrue(ct_rules.remove_block(agents))
                 self.assertEqual(agents.read_bytes(), original)
                 self.assertFalse(ct_rules.remove_block(agents))
