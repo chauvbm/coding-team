@@ -34,6 +34,9 @@ _TOOL_GROUP = {
 }
 _SHELL_LIKE = {'shell', 'shell:checks', 'browser_testing'}
 _ID = re.compile(r'^[a-z][a-z0-9-]*$')
+# MCP tool names are rendered unquoted (Claude `tools:` comma list, YAML list items),
+# so only plain identifiers are accepted: no comma, whitespace, newline or quote.
+_TOOL_NAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*')
 
 
 def _fail(message: str):
@@ -109,8 +112,12 @@ def extra_mcp_tools(capabilities, mcp_tools: dict[str, list[str]] | None) -> lis
     for key, tools in mcp_tools.items():
         if key not in CAPABILITIES:
             _fail(f'mcp_tools: unknown capability {key!r}')
-        if not isinstance(tools, (list, tuple)) or not all(isinstance(t, str) and t.strip() for t in tools):
-            _fail(f'mcp_tools[{key!r}] must be a list of non-empty strings')
+        if not isinstance(tools, (list, tuple)):
+            _fail(f'mcp_tools[{key!r}] must be a list of tool names')
+        for tool in tools:
+            if not isinstance(tool, str) or not _TOOL_NAME.fullmatch(tool):
+                _fail(f'mcp_tools[{key!r}]: invalid tool name {tool!r}; '
+                      f'expected {_TOOL_NAME.pattern}')
     result = []
     for cap in capabilities:
         for tool in mcp_tools.get(cap, ()):
@@ -246,7 +253,11 @@ def render_agent(role_id, variant_id, roles, cfg, mcp_tools=None) -> tuple[str, 
                 f'developer_instructions = {_toml_multiline(body)}\n')
         return f'{variant_id}.toml', _encode(text)
     if fmt == 'antigravity-md':
-        shell_like = any(cap in _SHELL_LIKE for cap in capabilities)
+        # Derive the policy from what is actually granted, not only from capabilities:
+        # an MCP-supplied name may coincide with a platform shell tool.
+        command_tools = set(cfg['tools']['shell']) | set(cfg['tools']['browser_testing'])
+        shell_like = (any(cap in _SHELL_LIKE for cap in capabilities)
+                      or any(tool in command_tools for tool in tools))
         head = ['---', f'name: {variant_id}', f'description: {_quoted(role["description"])}',
                 'mainAgent: false', 'subagent: true', 'hidden: false',
                 'inheritCustomizations: true',

@@ -156,6 +156,38 @@ class GuaranteeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ct_roles.extra_mcp_tools(researcher, {'delegate': ['mcp__x__y']})
 
+    def test_mcp_tool_names_must_be_plain_identifiers(self):
+        researcher = self.caps['ct-researcher']
+        claude = cfg()
+        bad_names = ['mcp__x__y, Agent', 'mcp__x__y,Agent', 'mcp__x__y\nmodel: opus',
+                     'mcp__x__y\n---\n', 'mcp x', '-mcp', '"mcp"', 'mcp__x__y\r', '']
+        for name in bad_names:
+            mcp = {'docs_lookup': [name]}
+            with self.assertRaises(ValueError, msg=repr(name)):
+                ct_roles.extra_mcp_tools(researcher, mcp)
+            with self.assertRaises(ValueError, msg=repr(name)):
+                ct_roles.tools_for(researcher, claude, mcp)
+            with self.assertRaises(ValueError, msg=repr(name)):
+                ct_roles.render_all(roles(), claude, mcp)
+        ok = 'mcp__plugin_context7_context7__query-docs'
+        self.assertEqual(ct_roles.extra_mcp_tools(researcher, {'docs_lookup': [ok]}), [ok])
+
+    def test_antigravity_policy_follows_resolved_tools(self):
+        agy = cfg('antigravity')
+        catalog = roles()
+        for tool in agy['tools']['shell'] + agy['tools']['browser_testing']:
+            mcp = {'docs_lookup': [tool]}
+            text = ct_roles.render_agent('ct-researcher', 'ct-researcher', catalog, agy, mcp)[1].decode('utf-8')
+            head = frontmatter(text)
+            self.assertIn(f'  - {tool}\n', head)
+            self.assertIn('commandExecutionPolicy: auto\n', head, tool)
+            self.assertIn('- no_file_write: ADVISORY\n', text)
+        plain = ct_roles.render_agent('ct-researcher', 'ct-researcher', catalog, agy)[1].decode('utf-8')
+        self.assertIn('commandExecutionPolicy: off\n', frontmatter(plain))
+        other = ct_roles.render_agent('ct-researcher', 'ct-researcher', catalog, agy,
+                                      {'docs_lookup': ['mcp__docs__lookup']})[1].decode('utf-8')
+        self.assertIn('commandExecutionPolicy: off\n', frontmatter(other))
+
     def test_read_only_never_gets_shell_or_delegate(self):
         claude = cfg()
         self.assertEqual(ct_roles.tools_for(self.caps['ct-architect'], claude), ['Read', 'Grep', 'Glob'])
