@@ -4,9 +4,9 @@ Read for multi-agent plan review or material disagreement. Leader routes issues;
 
 ## Review sequence and issue routing
 
-1. Freeze requirements, plan and review scope. For FULL_TEAM, name three distinct Architect, Developer and independent QA representatives in each scope; a reviewer transfer must preserve this separation. The same QA may later perform FinalQA. Additional workers report scoped findings rather than voting on every decision.
+1. Freeze requirements, plan and review scope. For FULL_TEAM, name three distinct Architect (`ct-architect`), Developer (`ct-developer`) and independent QA (`ct-reviewer`) representatives in each scope; a reviewer transfer must preserve this separation. The same QA may later perform FinalQA. Additional workers report scoped findings rather than voting on every decision.
 2. Initial reviewers independently inspect the same version. Do not share peers' conclusions before their first verdict. QA may derive acceptance cases from requirements before seeing the proposed solution when that would expose ambiguity.
-3. Leader consolidates findings by underlying failure scenario. Send each disputed issue, relevant changes and evidence only to its owner and affected reviewer(s). Use a Specialist only for a distinct unanswered question. Agent count and majority votes never settle correctness.
+3. Leader consolidates findings by underlying failure scenario. Send each disputed issue, relevant changes and evidence only to its owner and affected reviewer(s). Use `ct-security` or a `ct-researcher` (or a Developer/Reviewer `focus`) only for a distinct unanswered question. Agent count and majority votes never settle correctness.
 4. Apply the smallest correction, then obtain affected reassessment. Initial review, correction and reassessment are phases, not an invitation to restart full-team rounds. Stop once acceptance and required approvals are satisfied.
 
 ## Canonical issues and evidence
@@ -63,7 +63,7 @@ SPEC / PLAN / SCOPE: <current pair and affected scope>
 ARCHITECT: <named representative, scope, version, design acceptance or pending>
 DEVELOPER: <named representative, scope, version, independent verdict or pending>
 QA: <named independent representative, scope, version, verdict or pending>
-OTHER_AFFECTED_REVIEWS: <required specialist/owner verdicts, if applicable>
+OTHER_AFFECTED_REVIEWS: <required scoped verdicts, e.g. ct-security at L3, if applicable>
 MATERIAL_ISSUES: <canonical IDs and current states>
 GATE: PASS | HOLD
 OPERATING_STATE: ACTIVE | EVIDENCE_MODE | STOP_HOLD | PASS

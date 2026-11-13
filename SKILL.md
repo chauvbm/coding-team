@@ -1,62 +1,77 @@
 ---
 name: coding-team
-description: "Handle /coding team controls and coordinate substantial coding, debugging, planning or review with useful native subagents and independent verification. Respect eligibility; skip routine explanations and trivial edits unless requested."
+description: "Handle /coding-team controls and coordinate substantial coding, debugging, planning or review with role-scoped native subagents (ct-architect, ct-researcher, ct-developer, ct-test-engineer, ct-reviewer, ct-security) and independent verification. Respect eligibility and orchestrator routing; skip routine explanations and trivial edits unless requested."
 ---
 
 # Coding Team
 
-Use the smallest amount of coordination that improves the result. Leader owns scope, integration, verification and the final answer. Follow higher-priority instructions, applicable project rules and the user's authorization; this skill adds no permissions.
+Use the smallest amount of coordination that improves the result. Leader owns scope, integration, verification and the final answer. Follow higher-priority instructions, project rules and the user's authorization; this skill adds no permissions.
 
-## Choose the path first
+## Choose the orchestrator
 
-| Task | Action | Read next |
+Each phase of a task has one primary orchestrator. Apply top to bottom, first match wins; an explicit user choice wins unless safety policy forbids it. Details, ownership and handoff: [orchestration](references/orchestration.md).
+
+| # | Condition | Orchestrator |
 | --- | --- | --- |
-| Routine explanation or **L0** obvious reversible local edit | Work directly and verify proportionately. No team, formal plan or persistent ledger. | Nothing by default. |
-| **L1** bounded bug or feature | Use a brief checklist; add a focused reviewer only when useful. | Delegation references only if dispatching. |
-| **L2** cross-module work, unclear root cause or significant interface risk | Make a concise plan; delegate useful investigation, implementation or independent review. | [Workflow](references/workflow.md). |
-| **L3** meaningful security, integrity, production or irreversible consequences | Obtain independent review before the affected operation and define validation/recovery. Continue authorized reversible preparation. | Workflow and [quality guidance](references/quality-safety.md). |
-| Policy command | Change/report policy only; do not dispatch pending work. | [Control policy](references/control-policy.md). |
+| 1 | L3 consequences | coding-team |
+| 2 | Architecture conflict, or user asks for critique/consensus | coding-team |
+| 3 | Several interface contracts, schemas or APIs change | prefer coding-team |
+| 4 | Several independent problems to investigate | DPA (investigation only), then re-route |
+| 5 | Plan exists, scope clear, sequential review suffices | SDD |
+| 6 | Small, low-impact (L0 or bounded L1) | Leader directly |
 
-Level alone neither requires FULL_TEAM nor grants external authority or a new user-approval gate. Ask only for a missing decision or permission; preserve authorization already given.
+File count alone is never the criterion. Without Superpowers in the session, rows 4-5 go to coding-team AUTO. To apply the table to classified facts, run `python <skill dir>/scripts/coding_team.py orchestrator route --input FACTS.json`. Routing is ADVISORY: say the choice in one line and record it. When coding-team takes a task, run `orchestrator status`, then `orchestrator claim`; keep the returned token in context only.
+
+## Levels
+
+| Level | Meaning | Action |
+| --- | --- | --- |
+| **L0** | Routine explanation, obvious reversible local edit | Leader works directly; no team, plan or ledger. |
+| **L1** | Bounded bug or feature | Leader works directly with a checklist and may use technique skills; coding-team only on user request. |
+| **L2** | Cross-module work, unclear root cause, interface risk | Concise plan; delegate useful investigation, implementation or review. Read [workflow](references/workflow.md). |
+| **L3** | Meaningful security, integrity, production or irreversible consequences | Independent review before the affected operation, a `ct-security` report, validation and recovery. Read workflow and [quality guidance](references/quality-safety.md). |
+
+Level alone neither requires FULL_TEAM nor grants external authority or a new approval gate. Ask only for a missing decision or permission.
 
 ## Modes
 
-- **AUTO**, default: choose the smallest useful team; ordinary AUTO has no unanimous plan gate.
-- **SOLO**: do not delegate; verify directly and disclose material missing independence.
-- **PLAN_ONLY**: investigate and plan without implementation; write planning files only when requested.
-- **REVIEW_ONLY**: inspect and check without fixing implementation.
-- **FULL_TEAM**: cover Architect, Developer and independent QA, with named representatives and the plan gate below. Role coverage does not require filling slots.
-- **STRICT_MODEL**: honor exact user pins and resolved configured selections without unauthorized substitution; read [model routing](references/model-routing.md).
-- **USER_APPROVAL_REQUIRED**: wait for the user's required plan approval; retain approval for its agreed scope.
+- **AUTO**, default: the smallest useful team; no unanimous plan gate.
+- **SOLO**: do not delegate; verify directly and disclose missing independence.
+- **PLAN_ONLY**: investigate and plan without implementation.
+- **REVIEW_ONLY**: inspect and check without fixing.
+- **FULL_TEAM**: Architect, Developer and independent QA representatives and the plan gate below.
+- **STRICT_MODEL**: honor exact pins and configured selections without substitution; read [model routing](references/model-routing.md).
+- **USER_APPROVAL_REQUIRED**: wait for the user's plan approval.
 
-Do not change modes to evade a gate or stopping condition already established for the work.
+Do not change modes to evade a gate or stopping condition.
 
-## Eligibility and delegation
+## Eligibility
 
-Read [control policy](references/control-policy.md) for all `/coding team` commands (`on`, `off`, their `all` variants, `status`, `inherit`); `/coding-team` is an alias. Use the installed [helper](scripts/coding_team_policy.py) for direct controls, before applying coding-team and immediately before each dispatch. Routine SOLO explanations need no per-turn shell check. Never reuse cached ON after OFF.
+Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `/coding-team status`, `on`, `off`, `on --global`, `off --global`, `reset`, `help` (see [control policy](references/control-policy.md)). Run `status` before applying coding-team and immediately before each dispatch; never reuse a cached ON after OFF. Chat policy overrides global; an explicit human task request overrides eligibility for that task only. Missing, corrupt or `UNKNOWN` state means no automatic dispatch. Controls never reset task history or waive gates.
 
-Chat policy overrides global; an explicit human task request can override eligibility for that task only. ON permits useful work, not mandatory teams; OFF prevents automatic use. Unknown/missing/corrupt state or identity prevents automatic dispatch: preserve state and report the limitation. Controls never reset task history, waive gates or authorize continuation. Workers inherit root eligibility and cannot change it.
+## Roles and delegation
 
-Before dispatch, read [agent contracts](references/agent-contracts.md), [model routing](references/model-routing.md) and applicable [numeric defaults](references/governance-defaults.json). Use native subagents only where permitted. Capacity is the configured `max_subagents` excluding Leader, further limited by runtime, active workers and user limits. Start small when capacity is unknown. **No nested delegation.** Do not change global settings, create user-visible chats or relax permissions to obtain agents.
+| Role | Purpose | Ledger role |
+| --- | --- | --- |
+| `ct-architect` | Read-only design, interfaces, file-ownership matrix | Architect |
+| `ct-researcher` | One bounded code/docs/root-cause question, read-only | - |
+| `ct-developer` | Implements assigned files, optional `focus` | Developer |
+| `ct-test-engineer` | Writes and runs tests, incl. browser E2E | - |
+| `ct-reviewer` / `ct-reviewer-verify` | Independent QA: read-only review / review that runs checks | QA |
+| `ct-security` | Security, performance, concurrency on an exact snapshot; required at L3 | - |
 
-Give each file one writer; sequence shared changes and reserve independent-review capacity. Keep first reviews independent and route findings through Leader to relevant owners, avoiding all-to-all debate. Rejected spawns do not count as participation. Follow project-specific tools when applicable; no additional indexing tool is required by this skill.
+Before dispatch, read [agent contracts](references/agent-contracts.md), [model routing](references/model-routing.md) and [numeric defaults](references/governance-defaults.json). Tiers: default tiers come from the installed `platforms/<platform>.json`; Leader may raise or lower them. Guarantees: report ENFORCED/ADVISORY honestly; never present ADVISORY as a guarantee.
 
-## When a gate or disagreement applies
+**No nested delegation**: workers never dispatch, spawn or define agents, and never start another agent or AI CLI through a shell. Capacity is `max_subagents` excluding Leader, limited by runtime and user limits. Give each file one writer; keep first reviews independent and route findings through Leader. Do not change global settings or relax permissions to obtain agents.
 
-Read [debate governance](references/debate-governance.md) before full-team plan review, material disagreement or repair/recovery loops. It defines canonical issues, scoped approvals, controlled reviewer transfer and bounded evidence/recovery procedures; numeric limits have one source in governance defaults.
+## Gates and disagreement
 
-FULL_TEAM, a Leader-selected full-team plan review, or a user-required consensus gate requires PASS **before covered implementation**: three distinct representatives providing current Architect design acceptance and independent Developer/QA approvals of the same Spec/Plan pair, testable acceptance, valid scope/authority and no unresolved or contested BLOCKER/MAJOR. Notes may be nonblocking. Pending, missing or stale approval means HOLD, including reversible implementation. Continue permitted investigation, plan repair or unaffected work.
+Read [debate governance](references/debate-governance.md) for full-team plan review, material disagreement or repair loops. FULL_TEAM, a selected full-team plan review or a user-required gate needs PASS **before covered implementation**: distinct Architect, Developer and QA representatives approving the same Spec/Plan pair, testable acceptance and no unresolved BLOCKER/MAJOR. Pending or stale approval means HOLD. Material changes invalidate affected approvals; votes, silence, replacement or Leader rebuttal never supply approval.
 
-Material changes invalidate affected approvals. Preserve original findings and obtain current reassessment; only the controlled-transfer procedure can assign unavailable reviewers' responsibilities. Replacement, votes, Leader rebuttal, silence or a severity downgrade cannot supply approval. Missing agents never waive a required gate.
+At L3, Gate 2 also requires a complete `ct-security` report bound to the same snapshot, checked by `ct-reviewer`, with no unresolved BLOCKER/MAJOR, unless a valid user exception is recorded.
 
-Keep cumulative counters and findings across workers, retries and compaction. Do not reset them by renaming issues or changing executors. Follow evidence/STOP_HOLD checkpoints and actual human continuation authority; a repair extension does not extend other limits or waive gates. Honor explicit quota pauses using reliable telemetry.
-
-Use the [optional persistent ledger](references/task-ledger.md) when long, resumed, parallel or gated work makes context-only accounting fragile. Simple tasks need no state file. Ledger checks validate caller-authored records; they do not authenticate authority or intercept tools.
-
-For ungated SOLO records without an independent-review requirement, choose explicit self-check verification at initialization and record actual current checks. Preserve existing independent-QA requirements on resume; self-check evidence is never independent QA.
+Keep cumulative counters and findings across workers, retries and compaction. Use the [optional ledger](references/task-ledger.md) when context-only accounting is fragile; it validates records, not authority.
 
 ## Verify and finish
 
-Preserve existing workspace changes. Verify the stable integrated result, including relevant uncommitted/untracked files. Independent QA inspects the actual changes, not merely a Developer summary; affected changes after approval need renewed checks. Read quality guidance for substantial implementation, QA or recovery.
-
-Without agents, continue feasible authorized work only where required independent review or gates do not block it. Distinguish self-review from independent QA. Never fabricate participation, consensus, model metadata or results. Report actual checks, outcomes and material limits in the user's language. Skill rules are behavioral guidance, not runtime locks.
+Preserve workspace changes. Verify the stable integrated result, including uncommitted and untracked files. Self-review is never independent QA. Never fabricate participation, consensus, model metadata or results. Report actual checks, outcomes, effective models (or `unverified`) and limits in the user's language. Skill rules are behavioral guidance, not runtime locks.

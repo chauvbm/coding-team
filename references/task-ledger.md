@@ -2,6 +2,8 @@
 
 Use `scripts/task_ledger.py` for long, resumed, parallel or gated tasks when a prose ledger is too easy to lose. Simple tasks may keep concise prose. This helper stores and checks records; it does not dispatch agents, schedule work, inspect source or run tests. Numeric allowances come from [governance-defaults.json](governance-defaults.json), never a second set of constants.
 
+Ledger roles are logical gate responsibilities and keep their names: `Architect` = `ct-architect`, `Developer` = `ct-developer`, `QA` = `ct-reviewer` (or `ct-reviewer-verify`; both plan `QA` and `FinalQA` review entries come from this role). `ct-researcher`, `ct-test-engineer` and `ct-security` have no ledger role; at L3 the `ct-security` report is a Gate 2 condition checked by QA (see [quality guidance](quality-safety.md)). The ledger format is unchanged. Orchestrator ownership lives in `.coding-team/orchestration.json`, separate from the ledger ([orchestration](orchestration.md)).
+
 Keep real task ledgers outside the public working tree, or under a deliberately ignored private location. They can contain conversation/evidence references and should not be committed with the skill. `operating_state: PAUSED` preserves a quota or user pause while blocking gate and delivery readiness until an authorized resume is recorded.
 
 ## Commands and results
