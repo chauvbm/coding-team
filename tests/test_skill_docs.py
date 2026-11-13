@@ -2,6 +2,7 @@
 
 These are static text checks (kind a: docs/schema). They say nothing about agent behaviour.
 """
+import json
 import re
 import sys
 import unittest
@@ -48,7 +49,7 @@ class SkillDocsTests(unittest.TestCase):
 
     def test_no_legacy_command_syntax(self):
         """(a) docs: old command syntax appears only inside the legacy-migration block."""
-        files = doc_files(include_readme=False)
+        files = doc_files(include_readme=True)
         self.assertGreater(len(files), 5)
         saw_block = False
         for path in files:
@@ -74,7 +75,7 @@ class SkillDocsTests(unittest.TestCase):
     def test_relative_links_resolve(self):
         """(a) docs: every relative markdown link targets an existing file (and anchors an existing heading)."""
         checked = 0
-        for path in doc_files(include_readme=False):
+        for path in doc_files(include_readme=True):
             text = CODE_SPAN.sub('', FENCE.sub('', read(path)))
             for target in LINK.findall(text):
                 if re.match(r'^[a-z][a-z0-9+.-]*:', target, re.I) or target.startswith('#'):
@@ -99,6 +100,40 @@ class SkillDocsTests(unittest.TestCase):
                                                               'plan', 'small')]
         self.assertNotIn(-1, positions)
         self.assertEqual(sorted(positions), positions, 'routing conditions out of order: %s' % positions)
+
+    def test_readme_states_install_paths_and_guarantee_limits(self):
+        """(a) docs: README names the repo, installs all three platforms and states the ADVISORY limits."""
+        text = read(ROOT / 'README.md')
+        for phrase in ('chauvbm/coding-team.git', '--recover', '--replace-unmanaged', '--overwrite-modified',
+                       'granting any MCP tool makes `ct-researcher` guarantees ADVISORY',
+                       'shell access makes no-delegation ADVISORY', 'references/orchestration.md',
+                       'release.json', 'not yet verified', 'doctor'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase.lower(), text.lower())
+        self.assertNotIn('coding-team-codex.git', text)
+        for platform in ('claude-code', 'codex', 'antigravity'):
+            with self.subTest(platform=platform):
+                self.assertIn('install --platform %s --dry-run' % platform, text)
+                self.assertIn('install --platform %s --default on --global-rules' % platform, text)
+        self.assertNotIn('| verified |', text.lower(), 'no platform may be claimed verified without a smoke record')
+
+    def test_smoke_result_template_shape(self):
+        """(a) schema: the smoke template has the six checks, each with status/evidence/reason_if_not_run."""
+        data = json.loads(read(ROOT / 'docs' / 'smoke' / 'result-template.json'))
+        for key in ('platform', 'runtime_version', 'date', 'checks'):
+            self.assertIn(key, data)
+        self.assertEqual(set(data['checks']), {'dispatch', 'model_override', 'isolation', 'no_nesting',
+                                               'runtime_failure', 'routing_eval'})
+        for name, check in data['checks'].items():
+            with self.subTest(check=name):
+                self.assertIn(check['status'], ('PASS', 'FAIL', 'NOT_RUN'))
+                self.assertIn('evidence', check)
+                self.assertIn('reason_if_not_run', check)
+        guide = read(ROOT / 'docs' / 'smoke' / 'platform-smoke.md')
+        for phrase in ('--cases <checkout>/tests/orchestration_cases.json', 'check_behavioral_results.py',
+                       '--scope project', 'evaluations/<YYYY-MM-DD>-platform-smoke/<platform>.json'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, guide)
 
 
 def heading_slugs(markdown):

@@ -18,7 +18,7 @@ class ExportTests(unittest.TestCase):
         self.root = Path(self.temp.name) / 'source'
         self.root.mkdir()
         (self.root / 'SKILL.md').write_text('entry')
-        for folder in ('references', 'scripts', 'agents', 'tests', 'evaluations'):
+        for folder in ('references', 'scripts', 'agents', 'platforms', 'tests', 'evaluations'):
             (self.root / folder).mkdir()
             (self.root / folder / 'example.txt').write_text(folder)
         self.fixture = self.root / 'tests/cases.json'
@@ -33,6 +33,8 @@ class ExportTests(unittest.TestCase):
         self.assertFalse((out / 'skill/tests').exists())
         self.assertFalse((out / 'skill/evaluations').exists())
         self.assertTrue((out / 'skill/references/example.txt').exists())
+        for folder in ('scripts', 'agents', 'platforms'):
+            self.assertEqual((out / 'skill' / folder / 'example.txt').read_text(), folder)
 
     def test_refuses_overwrite_and_in_tree_destination(self):
         self.output.mkdir()
@@ -54,7 +56,10 @@ class ExportTests(unittest.TestCase):
     def test_link_preflight_precedes_explicit_and_temporary_destinations(self):
         original = Path.is_symlink
         # Match the canonical path used by export_inputs (Windows may expand 8.3 temp paths).
-        linked = (self.root / 'scripts' / 'example.txt').resolve()
+        for folder in ('scripts', 'platforms'):
+            self.check_link_preflight(original, (self.root / folder / 'example.txt').resolve())
+
+    def check_link_preflight(self, original, linked):
         with mock.patch.object(Path, 'is_symlink', lambda p: p == linked or original(p)), \
                 mock.patch.object(exporter.tempfile, 'mkdtemp') as create_temp:
             for output in (self.output, None):

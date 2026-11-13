@@ -6,9 +6,12 @@ import shutil
 import tempfile
 
 
+FOLDERS = ('references', 'scripts', 'agents', 'platforms')
+
+
 def check_resources(root):
     """Reject linked operational resources before creating an export destination."""
-    pending = [root / name for name in ('SKILL.md', 'references', 'scripts', 'agents')]
+    pending = [root / name for name in ('SKILL.md',) + FOLDERS]
     while pending:
         path = pending.pop()
         if path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction()):
@@ -38,7 +41,7 @@ def export_inputs(skill_root, cases_path, output=None):
     skill = out / 'skill'
     skill.mkdir()
     shutil.copy2(root / 'SKILL.md', skill / 'SKILL.md')
-    for folder in ('references', 'scripts', 'agents'):
+    for folder in FOLDERS:
         if (root / folder).exists():
             shutil.copytree(root / folder, skill / folder,
                             ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))

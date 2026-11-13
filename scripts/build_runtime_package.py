@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import stat
@@ -11,6 +12,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT = {'.py', '.md', '.json', '.yaml', '.yml', '.txt'}
+PLATFORM_NAME = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 EXCLUDED = {'__pycache__', '.git', 'backups', 'tests', 'benchmarks', 'evaluations', 'graphify-out', 'vendor'}
 
 
@@ -24,12 +26,19 @@ def reject_link(path):
         raise ValueError('linked resource rejected: ' + path.name)
 
 
-def resources(source_root):
+def resources(source_root, platform=None):
     root = Path(source_root).absolute()
     reject_link(root)
     root = root.resolve()
+    keep_platform = None
+    if platform is not None:
+        if not isinstance(platform, str) or not PLATFORM_NAME.match(platform):
+            raise ValueError('invalid platform name')
+        keep_platform = Path('platforms', platform + '.json')
+        if not (root / keep_platform).is_file():
+            raise ValueError('unknown platform: ' + platform)
     selected = []
-    for name in ('LICENSE', 'SKILL.md', 'agents', 'references', 'scripts'):
+    for name in ('LICENSE', 'SKILL.md', 'agents', 'platforms', 'references', 'scripts'):
         path = root / name
         reject_link(path)
         if not path.exists():
@@ -44,6 +53,8 @@ def resources(source_root):
                 pending.extend(entry.iterdir())
             elif entry.is_file():
                 rel = entry.relative_to(root)
+                if keep_platform is not None and rel.parts[0] == 'platforms' and rel != keep_platform:
+                    continue
                 if not EXCLUDED.intersection(rel.parts) and entry.suffix not in ('.pyc', '.pyo'):
                     selected.append(entry)
             else:
@@ -64,8 +75,9 @@ def source_revision(root):
         return None
 
 
-def build_package(source_root=ROOT, output=None):
-    root, files = resources(source_root)  # Complete preflight before allocating output.
+def build_package(source_root=ROOT, output=None, platform=None):
+    """Package runtime resources; with ``platform``, keep only platforms/<platform>.json."""
+    root, files = resources(source_root, platform)  # Complete preflight before allocating output.
     payloads = {}
     for path in files:
         data = path.read_bytes()
@@ -73,7 +85,7 @@ def build_package(source_root=ROOT, output=None):
             data = data.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n').encode('utf-8')
         payloads[path.relative_to(root).as_posix()] = data
     manifest = {'schema_version': 1, 'source_git_head': source_revision(root),
-                'source_kind': 'working_tree', 'text_encoding': 'UTF-8/LF',
+                'source_kind': 'working_tree', 'text_encoding': 'UTF-8/LF', 'platform': platform,
                 'files': {name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
                           for name, data in payloads.items()}}
     default_dir = None
@@ -81,7 +93,7 @@ def build_package(source_root=ROOT, output=None):
         if Path(tempfile.gettempdir()).resolve().is_relative_to(root):
             raise ValueError('temporary directory is inside the source project; specify an external output')
         default_dir = Path(tempfile.mkdtemp(prefix='coding-team-runtime-'))
-        destination = default_dir / 'coding-team-runtime.zip'
+        destination = default_dir / 'coding-team.zip'
     else:
         destination = Path(output).absolute()
         if destination.resolve().is_relative_to(root):
@@ -113,9 +125,10 @@ def build_package(source_root=ROOT, output=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--platform', help='keep only platforms/PLATFORM.json (default: all platforms)')
     args = parser.parse_args()
     try:
-        print(build_package(output=args.output))
+        print(build_package(output=args.output, platform=args.platform))
         return 0
     except (OSError, ValueError, UnicodeError) as error:
         print(json.dumps({'error': str(error)}))

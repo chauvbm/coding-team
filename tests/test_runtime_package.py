@@ -24,6 +24,9 @@ class RuntimePackageTests(unittest.TestCase):
         for name in ('scripts', 'references', 'agents', 'tests', 'benchmarks', 'evaluations', 'graphify-out', '.git'):
             (self.root / name).mkdir()
             (self.root / name / 'marker.txt').write_text(name)
+        (self.root / 'platforms').mkdir()
+        for name in ('a', 'b'):
+            (self.root / 'platforms' / (name + '.json')).write_text('{"platform": "%s"}' % name)
         cache = self.root / 'scripts/__pycache__'
         cache.mkdir()
         (cache / 'ignore.pyc').write_bytes(b'cache')
@@ -37,13 +40,30 @@ class RuntimePackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.out) as archive:
             names = set(archive.namelist())
             self.assertEqual(names, {'coding-team/' + n for n in ('LICENSE', 'SKILL.md',
-                'scripts/marker.txt', 'references/marker.txt', 'agents/marker.txt', 'runtime-package.json')})
+                'scripts/marker.txt', 'references/marker.txt', 'agents/marker.txt',
+                'platforms/a.json', 'platforms/b.json', 'runtime-package.json')})
             manifest = json.loads(archive.read('coding-team/runtime-package.json'))
             self.assertIsNone(manifest['source_git_head'])
             self.assertEqual(archive.read('coding-team/SKILL.md'), b'example\n')
             for name, metadata in manifest['files'].items():
                 data = archive.read('coding-team/' + name)
                 self.assertEqual(metadata, {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)})
+
+    def test_platform_filter_keeps_one_config(self):
+        builder.build_package(self.root, self.out, platform='b')
+        with zipfile.ZipFile(self.out) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read('coding-team/runtime-package.json'))
+        self.assertIn('coding-team/platforms/b.json', names)
+        self.assertNotIn('coding-team/platforms/a.json', names)
+        self.assertIn('coding-team/scripts/marker.txt', names)
+        self.assertNotIn('platforms/a.json', manifest['files'])
+        self.assertEqual(manifest['platform'], 'b')
+
+    def test_unknown_platform_rejected_before_output(self):
+        for bad in ('c', '../a', ''):
+            with self.assertRaises(ValueError): builder.build_package(self.root, self.out, platform=bad)
+        self.assertFalse(self.out.exists())
 
     def test_existing_output_and_in_tree_output_are_preserved(self):
         self.out.write_bytes(b'keep')

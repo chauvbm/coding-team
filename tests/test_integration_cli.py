@@ -164,20 +164,26 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertEqual(code, 1, data)
         self.assertEqual(data['manifest'], 'invalid')
 
-    @unittest.expectedFailure  # Task 14 removes this marker
     def test_install_from_extracted_runtime_package(self):
         builder = load_builder()
         archive_path = self.root / 'runtime.zip'
-        builder.build_package(ROOT, archive_path)
+        builder.build_package(ROOT, archive_path, platform='claude-code')
         extracted = self.root / 'extracted'
         extracted.mkdir()
         with zipfile.ZipFile(archive_path) as archive:
             archive.extractall(extracted)
-        script = extracted / 'coding-team' / 'scripts' / 'coding_team.py'
+        package = extracted / 'coding-team'
+        self.assertEqual(sorted(p.name for p in (package / 'platforms').iterdir()), ['claude-code.json'])
+        self.assertTrue((package / 'agents' / 'roles' / 'roles.json').is_file())
+        script = package / 'scripts' / 'coding_team.py'
         self.assertTrue(script.is_file())
         self.install(script=script)
         self.assertTrue((self.skill / 'SKILL.md').is_file())
         code, data = self.run_cli('doctor', '--platform', 'claude-code')
+        self.assertEqual(code, 0, data)
+        self.assertTrue(data['healthy'], data)
+        # The installed copy resolves its platform from its own manifest.
+        code, data = self.run_cli('doctor', script=self.skill / 'scripts' / 'coding_team.py')
         self.assertEqual(code, 0, data)
         self.assertTrue(data['healthy'], data)
 

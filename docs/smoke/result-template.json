@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "platform": "claude-code | codex | antigravity",
+  "runtime_version": "",
+  "date": "YYYY-MM-DD",
+  "source_commit": "",
+  "install": {
+    "scope": "project",
+    "doctor_healthy": null,
+    "eligibility": "explicit request | user-level state ON"
+  },
+  "checks": {
+    "dispatch": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "not yet run",
+      "roles": {
+        "ct-architect": {"dispatched": null, "requested_model": null, "effective_model": "unverified"},
+        "ct-researcher": {"dispatched": null, "requested_model": null, "effective_model": "unverified"},
+        "ct-developer": {"dispatched": null, "requested_model": null, "effective_model": "unverified"},
+        "ct-test-engineer": {"dispatched": null, "requested_model": null, "effective_model": "unverified"},
+        "ct-reviewer": {"dispatched": null, "requested_model": null, "effective_model": "unverified"},
+        "ct-reviewer-verify": {"dispatched": null, "requested_model": null, "effective_model": "unverified"},
+        "ct-security": {"dispatched": null, "requested_model": null, "effective_model": "unverified"}
+      }
+    },
+    "model_override": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "not yet run"
+    },
+    "isolation": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "not yet run"
+    },
+    "no_nesting": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "not yet run"
+    },
+    "runtime_failure": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "not yet run"
+    },
+    "routing_eval": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "not yet run",
+      "cases": "tests/orchestration_cases.json",
+      "checker_exit_code": null,
+      "passed": null,
+      "total": null,
+      "failed_case_ids": []
+    }
+  },
+  "notes": ""
+}
