@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "platform": "claude-code",
+  "runtime_version": "2.1.321 (Claude Code desktop)",
+  "date": "2026-11-14",
+  "source_commit": "3276a68e3f1fd2cbedd91dc2c9745f3bafe87ff7",
+  "install": {
+    "scope": "project",
+    "doctor_healthy": true,
+    "eligibility": "not exercised (no runtime session loaded the project agents)"
+  },
+  "checks": {
+    "dispatch": {
+      "status": "NOT_RUN",
+      "evidence": "install --scope project into a temp dir and doctor ran: healthy true, manifest ok, 7 agent files present; doctor guarantee matrix for Claude Code read-only roles ENFORCED. No runtime dispatch performed.",
+      "reason_if_not_run": "the nested `claude -p` session was \"Not logged in\" (credentials not available to a child process) and this session's Agent tool does not load the project-scope ct-* agents; no real dispatch could be made",
+      "roles": {
+        "ct-architect": {
+          "dispatched": null,
+          "requested_model": null,
+          "effective_model": "unverified"
+        },
+        "ct-researcher": {
+          "dispatched": null,
+          "requested_model": null,
+          "effective_model": "unverified"
+        },
+        "ct-developer": {
+          "dispatched": null,
+          "requested_model": null,
+          "effective_model": "unverified"
+        },
+        "ct-test-engineer": {
+          "dispatched": null,
+          "requested_model": null,
+          "effective_model": "unverified"
+        },
+        "ct-reviewer": {
+          "dispatched": null,
+          "requested_model": null,
+          "effective_model": "unverified"
+        },
+        "ct-reviewer-verify": {
+          "dispatched": null,
+          "requested_model": null,
+          "effective_model": "unverified"
+        },
+        "ct-security": {
+          "dispatched": null,
+          "requested_model": null,
+          "effective_model": "unverified"
+        }
+      }
+    },
+    "model_override": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "the nested `claude -p` session was \"Not logged in\" (credentials not available to a child process) and this session's Agent tool does not load the project-scope ct-* agents; no real dispatch could be made"
+    },
+    "isolation": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "the nested `claude -p` session was \"Not logged in\" (credentials not available to a child process) and this session's Agent tool does not load the project-scope ct-* agents; no real dispatch could be made"
+    },
+    "no_nesting": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "the nested `claude -p` session was \"Not logged in\" (credentials not available to a child process) and this session's Agent tool does not load the project-scope ct-* agents; no real dispatch could be made"
+    },
+    "runtime_failure": {
+      "status": "NOT_RUN",
+      "evidence": "",
+      "reason_if_not_run": "the nested `claude -p` session was \"Not logged in\" (credentials not available to a child process) and this session's Agent tool does not load the project-scope ct-* agents; no real dispatch could be made"
+    },
+    "routing_eval": {
+      "status": "FAIL",
+      "evidence": "Blind evaluator = a fresh general-purpose subagent started through this session's Agent tool (model sonnet) that read only the exported skill and inputs/01-12.json; scored with tests/check_behavioral_results.py: exit 1, 11/12 passed. Failure: worker_requests_sdd answered action=hold but the fixture (tests/orchestration_cases.json) expects one_of [direct_work, schedule_work, implement, await_review]. The plan's own Task 13 table said hold, the committed fixture says otherwise: the oracle disagrees with the plan, so the case is kept as a recorded FAIL, not edited after scoring.",
+      "reason_if_not_run": "",
+      "cases": "tests/orchestration_cases.json",
+      "checker_exit_code": 1,
+      "passed": 11,
+      "total": 12,
+      "failed_case_ids": [
+        "worker_requests_sdd"
+      ]
+    }
+  },
+  "notes": "Evaluator was a subagent of the same Claude Code runtime, not an isolated separate session; raw answers stored in claude-code-routing-responses.json. Runtime checks dispatch/model_override/isolation/no_nesting/runtime_failure are NOT_RUN. Smoke tmp project removed."
+}

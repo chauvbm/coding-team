@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-14",
+  "source_commit": "3276a68e3f1fd2cbedd91dc2c9745f3bafe87ff7",
+  "merge_approved_by_user": false,
+  "platforms": {
+    "claude-code": {
+      "record": "claude-code.json",
+      "runtime_version": "2.1.321 (Claude Code desktop)",
+      "all_checks_pass": false
+    },
+    "codex": {
+      "record": null,
+      "runtime_version": null,
+      "all_checks_pass": false,
+      "note": "not run"
+    },
+    "antigravity": {
+      "record": null,
+      "runtime_version": null,
+      "all_checks_pass": false,
+      "note": "not run"
+    }
+  }
+}
