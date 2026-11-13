@@ -117,6 +117,15 @@ class PlatformConfigTests(unittest.TestCase):
         self.assertIn(paths['state_file'].parent, paths['managed_roots'])
         self.assertIn(paths['global_rules_file'].parent, paths['managed_roots'])
 
+    def test_antigravity_read_tools_narrow(self):
+        agy = cfg('antigravity')
+        self.assertEqual(agy['tools']['read'], ['send_message', 'view_file'])
+        self.assertEqual(agy['tools']['docs_lookup'], ['read_url_content', 'search_web'])
+        for name in ct_platform.PLATFORMS:
+            for key, items in cfg(name)['tools'].items():
+                self.assertNotIn('schedule', items, (name, key))
+                self.assertNotIn('generate_image', items, (name, key))
+
     def test_aux_files_next_to_state(self):
         paths = ct_platform.target_paths(cfg(), 'user', {}, self.home, None)
         parent = paths['state_file'].parent

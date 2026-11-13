@@ -50,13 +50,12 @@
   "tools": {
     "read": [
       "send_message",
-      "view_file",
-      "read_url_content",
-      "search_web",
-      "schedule",
-      "generate_image"
+      "view_file"
     ],
-    "docs_lookup": [],
+    "docs_lookup": [
+      "read_url_content",
+      "search_web"
+    ],
     "write": [
       "write_to_file",
       "replace_file_content",
