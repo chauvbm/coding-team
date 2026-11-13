@@ -12,10 +12,10 @@ import stat
 import sys
 
 try:
-    from coding_team_policy import locked, atomic_write
+    from ct_storage import locked, atomic_write
 except ImportError:  # also support importlib-based test consumers
     import importlib.util
-    _spec = importlib.util.spec_from_file_location('ledger_policy_storage', Path(__file__).with_name('coding_team_policy.py'))
+    _spec = importlib.util.spec_from_file_location('ledger_policy_storage', Path(__file__).with_name('ct_storage.py'))
     _storage = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_storage)
     locked, atomic_write = _storage.locked, _storage.atomic_write
