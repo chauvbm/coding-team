@@ -1,0 +1,104 @@
+{
+  "schema_version": 2,
+  "platform": "claude-code",
+  "verified_on": "2026-11-13",
+  "config_root": {
+    "env": "CLAUDE_CONFIG_DIR",
+    "default": "{home}/.claude"
+  },
+  "tiers": {
+    "inherit": {
+      "model": null,
+      "effort": null
+    },
+    "strong": {
+      "model": "opus",
+      "effort": "high"
+    },
+    "standard": {
+      "model": "sonnet",
+      "effort": "medium"
+    },
+    "light": {
+      "model": "haiku",
+      "effort": "low"
+    }
+  },
+  "roles": {
+    "ct-architect": {
+      "tier": "strong"
+    },
+    "ct-researcher": {
+      "tier": "light"
+    },
+    "ct-developer": {
+      "tier": "standard"
+    },
+    "ct-test-engineer": {
+      "tier": "standard"
+    },
+    "ct-reviewer": {
+      "tier": "strong"
+    },
+    "ct-security": {
+      "tier": "strong"
+    }
+  },
+  "effort_vocabulary": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "static_agent_model": "default",
+  "tool_allowlist_enforced": true,
+  "tools": {
+    "read": [
+      "Read",
+      "Grep",
+      "Glob"
+    ],
+    "docs_lookup": [
+      "WebFetch",
+      "WebSearch"
+    ],
+    "write": [
+      "Edit",
+      "Write",
+      "NotebookEdit"
+    ],
+    "shell": [
+      "Bash",
+      "PowerShell"
+    ],
+    "browser_testing": [
+      "Bash",
+      "PowerShell"
+    ],
+    "delegate": [
+      "Agent"
+    ]
+  },
+  "agent_format": "claude-md",
+  "paths": {
+    "skill_dir": "{config_root}/skills/coding-team",
+    "agents_dir": "{config_root}/agents",
+    "global_rules_file": "{config_root}/CLAUDE.md",
+    "state_file": "{config_root}/coding-team/state.json"
+  },
+  "project_paths": {
+    "skill_dir": ".claude/skills/coding-team",
+    "agents_dir": ".claude/agents"
+  },
+  "chat_id_env": [
+    "CLAUDE_CODE_SESSION_ID"
+  ],
+  "detect_env": [
+    "CLAUDECODE"
+  ],
+  "force_model_env": [
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
+  ],
+  "invocation": "/coding-team"
+}

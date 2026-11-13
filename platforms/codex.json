@@ -1,0 +1,85 @@
+{
+  "schema_version": 2,
+  "platform": "codex",
+  "verified_on": "2026-11-13",
+  "config_root": {
+    "env": "CODEX_HOME",
+    "default": "{home}/.codex"
+  },
+  "tiers": {
+    "inherit": {
+      "model": null,
+      "effort": null
+    },
+    "strong": {
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "standard": {
+      "model": "gpt-6-luna",
+      "effort": "medium"
+    },
+    "light": {
+      "model": "gpt-6-luna",
+      "effort": "low"
+    }
+  },
+  "roles": {
+    "ct-architect": {
+      "tier": "strong"
+    },
+    "ct-researcher": {
+      "tier": "light"
+    },
+    "ct-developer": {
+      "tier": "standard"
+    },
+    "ct-test-engineer": {
+      "tier": "standard"
+    },
+    "ct-reviewer": {
+      "tier": "strong"
+    },
+    "ct-security": {
+      "tier": "strong"
+    }
+  },
+  "effort_vocabulary": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra"
+  ],
+  "static_agent_model": "omit",
+  "tool_allowlist_enforced": false,
+  "tools": {
+    "read": [],
+    "docs_lookup": [],
+    "write": [],
+    "shell": [],
+    "browser_testing": [],
+    "delegate": []
+  },
+  "agent_format": "codex-toml",
+  "paths": {
+    "skill_dir": "{home}/.agents/skills/coding-team",
+    "agents_dir": "{config_root}/agents",
+    "global_rules_file": "{config_root}/AGENTS.md",
+    "state_file": "{config_root}/coding-team/state.json"
+  },
+  "project_paths": {
+    "skill_dir": ".agents/skills/coding-team",
+    "agents_dir": ".codex/agents"
+  },
+  "chat_id_env": [
+    "CODEX_THREAD_ID"
+  ],
+  "detect_env": [
+    "CODEX_THREAD_ID",
+    "CODEX_HOME"
+  ],
+  "force_model_env": [],
+  "invocation": "$coding-team"
+}

@@ -1,0 +1,99 @@
+{
+  "schema_version": 2,
+  "platform": "antigravity",
+  "verified_on": "2026-11-13",
+  "config_root": {
+    "env": null,
+    "default": "{home}/.gemini"
+  },
+  "tiers": {
+    "inherit": {
+      "model": null,
+      "effort": null
+    },
+    "strong": {
+      "model": "pro",
+      "effort": null
+    },
+    "standard": {
+      "model": "flash",
+      "effort": null
+    },
+    "light": {
+      "model": "flash_lite",
+      "effort": null
+    }
+  },
+  "roles": {
+    "ct-architect": {
+      "tier": "strong"
+    },
+    "ct-researcher": {
+      "tier": "light"
+    },
+    "ct-developer": {
+      "tier": "standard"
+    },
+    "ct-test-engineer": {
+      "tier": "standard"
+    },
+    "ct-reviewer": {
+      "tier": "strong"
+    },
+    "ct-security": {
+      "tier": "strong"
+    }
+  },
+  "effort_vocabulary": [],
+  "static_agent_model": "omit",
+  "tool_allowlist_enforced": true,
+  "tools": {
+    "read": [
+      "send_message",
+      "view_file",
+      "read_url_content",
+      "search_web",
+      "schedule",
+      "generate_image"
+    ],
+    "docs_lookup": [],
+    "write": [
+      "write_to_file",
+      "replace_file_content",
+      "multi_replace_file_content",
+      "notebook_edit"
+    ],
+    "shell": [
+      "run_command",
+      "manage_task"
+    ],
+    "browser_testing": [
+      "run_command"
+    ],
+    "delegate": [
+      "invoke_subagent",
+      "define_subagent"
+    ]
+  },
+  "agent_format": "antigravity-md",
+  "paths": {
+    "skill_dir": "{config_root}/config/skills/coding-team",
+    "agents_dir": "{config_root}/config/agents",
+    "global_rules_file": "{config_root}/config/rules/coding-team-policy.md",
+    "state_file": "{config_root}/antigravity/coding-team/state.json"
+  },
+  "project_paths": {
+    "skill_dir": ".agents/skills/coding-team",
+    "agents_dir": ".agents/agents"
+  },
+  "chat_id_env": [
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "ANTIGRAVITY_CHAT_ID"
+  ],
+  "detect_env": [
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "ANTIGRAVITY_CHAT_ID"
+  ],
+  "force_model_env": [],
+  "invocation": "/coding-team"
+}
