@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "roles": {
+    "ct-architect": {
+      "description": "coding-team worker: read-only design, interface contracts and file-ownership matrix for a bounded task. Dispatched by the coding-team Leader only.",
+      "ledger_role": "Architect",
+      "variants": {
+        "ct-architect": ["read"]
+      }
+    },
+    "ct-researcher": {
+      "description": "coding-team worker: answers one bounded code, documentation or root-cause question with source evidence. Read-only. Dispatched by the coding-team Leader only.",
+      "ledger_role": null,
+      "variants": {
+        "ct-researcher": ["read", "docs_lookup"]
+      }
+    },
+    "ct-developer": {
+      "description": "coding-team worker: implements an assigned work item, editing only assigned files, optionally with a named focus. Dispatched by the coding-team Leader only.",
+      "ledger_role": "Developer",
+      "variants": {
+        "ct-developer": ["read", "write:assigned", "shell"]
+      }
+    },
+    "ct-test-engineer": {
+      "description": "coding-team worker: derives behavioral cases, writes and runs tests including browser end-to-end checks on a stable snapshot. Dispatched by the coding-team Leader only.",
+      "ledger_role": null,
+      "variants": {
+        "ct-test-engineer": ["read", "write:tests", "shell", "browser_testing"]
+      }
+    },
+    "ct-reviewer": {
+      "description": "coding-team worker: independent QA review of a stable snapshot; ct-reviewer reviews read-only, ct-reviewer-verify may also run checks. Dispatched by the coding-team Leader only.",
+      "ledger_role": "QA",
+      "variants": {
+        "ct-reviewer": ["read"],
+        "ct-reviewer-verify": ["read", "shell:checks"]
+      }
+    },
+    "ct-security": {
+      "description": "coding-team worker: read-only security, performance and concurrency review bound to an exact snapshot; required at L3 before Gate 2. Dispatched by the coding-team Leader only.",
+      "ledger_role": null,
+      "variants": {
+        "ct-security": ["read"]
+      }
+    }
+  }
+}
