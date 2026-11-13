@@ -13,8 +13,8 @@ Requires Git and Python 3.11 or newer (standard library only). Installation is d
 Always preview first: `install --dry-run` lists every path it would write, back up or remove, plus conflicts, and creates nothing (no file, directory, lock, staging or backup). Then run the real install. Options:
 
 - `--default on|off` sets the global ON/OFF default (state is user-level). Without it, existing state is kept; a new state starts ON.
-- `--global-rules` writes a marked block (`<!-- coding-team-policy:start -->` ... `<!-- coding-team-policy:end -->`) into the platform's global rules file so the Leader handles `/coding-team` controls and routing even before selecting the skill. Bytes outside the markers are never changed.
-- `--scope project --project-dir DIR` installs only the skill and agents into one project, plus a lock file (`install.lock.lock`) under `<config_root>/coding-team/`, and a backup directory only when an existing file is replaced; no state file or rules file is touched. It cannot be combined with `--default` or `--global-rules`; the ON/OFF state stays user-level.
+- `--global-rules` writes a marked block (`<!-- coding-team-policy:start -->` ... `<!-- coding-team-policy:end -->`) into the platform's global rules file so the Leader handles `/coding-team` controls and routing even before selecting the skill. Bytes outside the markers are never changed. The block embeds the Python executable used at install time (`sys.executable`); re-run `install --global-rules` after changing or removing that Python or virtual environment. On Windows it carries both a PowerShell form and a Git Bash / POSIX form of each command.
+- `--scope project --project-dir DIR` installs only the skill and agents into one project, plus a lock file (`install.lock.lock`) under `<config_root>/coding-team/`, and a backup directory only when an existing file is replaced; no state file or rules file is touched. It cannot be combined with `--default` or `--global-rules`; the ON/OFF state stays user-level. A project-only install therefore has no state file: `/coding-team on|off` (including `--global`) fail until a user-scope install has run.
 
 Every CLI call prints exactly one JSON object; exit 0 = success, 1 = valid but negative, 2 = error or conflict. Start a fresh chat after installing so the platform loads the new skill and agents. The examples use `python`; use your actual interpreter (for example `python3`), and in PowerShell quote paths with spaces and use the call operator (`& 'C:\path\python.exe' 'C:\src\coding-team\scripts\coding_team.py' ...`).
 
@@ -162,6 +162,10 @@ An L2 task that matches no earlier condition goes to coding-team. File count alo
 | Antigravity | not yet verified | - | - |
 
 This table is filled only from a published smoke record, `evaluations/<date>-platform-smoke/release.json` (per-platform results in `evaluations/<date>-platform-smoke/<platform>.json`), produced with the [platform smoke kit](docs/smoke/platform-smoke.md). Passing unit tests and a valid platform config do not verify a runtime.
+
+## Known limitations
+
+- `browser_testing` has no provider-detection config, and the unsafe Playwright tools (`browser_run_code_unsafe`, `browser_file_upload`) are instructed against in `ct-test-engineer`, not disabled at runtime. The guarantee stays ADVISORY.
 
 ## Repository map
 

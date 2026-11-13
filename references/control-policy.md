@@ -51,7 +51,7 @@ The `python <skill dir>/scripts/coding_team.py` form in these docs is shorthand.
 & '<actual Python executable>' '<skill dir>/scripts/coding_team.py' command '/coding-team off'
 ```
 
-The `--global-rules` block already embeds correctly quoted commands for the host shell; prefer it when present. For tests, use an isolated `--state` file and an explicit `--chat-id`, never the real user state or chat identity.
+The `--global-rules` block already embeds correctly quoted commands for the host shell (on Windows both a PowerShell and a Git Bash / POSIX form; use the one matching your shell); prefer it when present. It embeds the Python executable used at install time (`sys.executable`): re-run `install --global-rules` after changing or removing that Python or virtual environment. `status` and `command` output include `state_path`. For tests, use an isolated `--state` file and an explicit `--chat-id`, never the real user state or chat identity.
 
 ```text
 coding_team.py install   --platform P [--scope user|project] [--project-dir DIR] [--default on|off]

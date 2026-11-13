@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -104,6 +105,51 @@ class RulesTests(unittest.TestCase):
         order = [text.index(f'\n{n}. ') for n in range(1, 7)]
         self.assertEqual(order, sorted(order))
 
+    def test_shell_forms_and_labels(self):
+        text = self.block()
+        if os.name == 'nt':
+            self.assertIn('use the one matching the shell you are running', text)
+            for line in (l for l in text.splitlines() if l.startswith(('Check eligibility', 'Handle direct'))):
+                self.assertIn("PowerShell: `& '", line)
+                self.assertIn('Git Bash / POSIX shell: `', line)
+            posix = re.findall(r'Git Bash / POSIX shell: `([^`]*)`', text)
+            self.assertEqual(len(posix), 2)
+            self.assertFalse(any(item.startswith('&') for item in posix))
+        else:
+            self.assertNotIn('PowerShell', text)
+            self.assertNotIn('& ', text.split('Chat id contract')[0])
+
+    @staticmethod
+    def _forms(text):
+        """Return {label: (status_command, command_template)} from a rendered block."""
+        status_line = next(l for l in text.splitlines() if l.startswith('Check eligibility'))
+        command_line = next(l for l in text.splitlines() if l.startswith('Handle direct'))
+        if os.name == 'nt':
+            pattern = r'(PowerShell|Git Bash / POSIX shell): `([^`]*)`'
+            status = dict(re.findall(pattern, status_line))
+            command = dict(re.findall(pattern, command_line))
+            return {label: (status[label], command[label]) for label in status}
+        return {'sh': (re.search(r'by running `([^`]*)`', status_line).group(1),
+                       re.search(r'commands with `([^`]*)`', command_line).group(1))}
+
+    @staticmethod
+    def _shell_args(label):
+        if label == 'PowerShell':
+            shell = shutil.which('powershell') or shutil.which('pwsh')
+            if shell is None:
+                raise unittest.SkipTest('PowerShell not found')
+            return [shell, '-NoProfile', '-NonInteractive', '-Command']
+        if os.name != 'nt':
+            return ['/bin/sh', '-c']
+        candidates = [Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe']
+        git = shutil.which('git')
+        if git:
+            candidates.append(Path(git).resolve().parents[1] / 'bin/bash.exe')
+        for candidate in candidates:
+            if candidate.is_file():
+                return [str(candidate), '-c']
+        raise unittest.SkipTest('Git Bash not found')
+
     @unittest.skipUnless((SCRIPTS / 'coding_team.py').exists(), 'CLI added in Task 10')
     def test_generated_commands_execute_with_special_paths(self):
         special = "spaces apostrophe' $(echo SUBSTITUTED) Nguyễn"
@@ -115,30 +161,29 @@ class RulesTests(unittest.TestCase):
         shutil.copyfile(ROOT / 'platforms/claude-code.json', skill / 'platforms/claude-code.json')
         shutil.copytree(ROOT / 'agents/roles', skill / 'agents/roles')
         state = self.root / special / 'state file.json'
-        ct_policy.initialize_state(state)
         text = ct_rules.render_rules_block(
             platform='claude-code', python=sys.executable, cli=skill / 'scripts/coding_team.py',
             state=state, skill_dir=skill)
-        status_command = text.split('by running `', 1)[1].split('`', 1)[0]
-        template = text.split('Handle direct user commands with `', 1)[1].split('`', 1)[0]
         env = dict(os.environ, CLAUDE_CODE_SESSION_ID='fixture-shell')
-        if os.name == 'nt':
-            shell = shutil.which('powershell') or shutil.which('pwsh')
-            self.assertIsNotNone(shell, 'PowerShell is required on Windows')
-            shell_args = [shell, '-NoProfile', '-NonInteractive', '-Command']
-        else:
-            shell_args = ['/bin/sh', '-c']
-        before = state.read_bytes()
-        result = subprocess.run(shell_args + [status_command], env=env, capture_output=True,
-                                text=True, encoding='utf-8', timeout=30)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout)['effective_policy'], 'ON')
-        self.assertEqual(state.read_bytes(), before)
-        command = template.replace(shell_argument('<exact command>'), shell_argument('/coding-team off'))
-        result = subprocess.run(shell_args + [command], env=env, capture_output=True,
-                                text=True, encoding='utf-8', timeout=30)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout)['effective_policy'], 'OFF')
+        forms = self._forms(text)
+        self.assertEqual(len(forms), 2 if os.name == 'nt' else 1)
+        for label, (status_command, template) in forms.items():
+            with self.subTest(shell=label):
+                shell_args = self._shell_args(label)
+                state.unlink(missing_ok=True)
+                ct_policy.initialize_state(state)
+                before = state.read_bytes()
+                result = subprocess.run(shell_args + [status_command], env=env, capture_output=True,
+                                        text=True, encoding='utf-8', timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertEqual(json.loads(result.stdout)['effective_policy'], 'ON')
+                self.assertEqual(state.read_bytes(), before)
+                command = template.replace(shell_argument('<exact command>'),
+                                           shell_argument('/coding-team off'))
+                result = subprocess.run(shell_args + [command], env=env, capture_output=True,
+                                        text=True, encoding='utf-8', timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertEqual(json.loads(result.stdout)['effective_policy'], 'OFF')
 
 
 if __name__ == '__main__':

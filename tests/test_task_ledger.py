@@ -22,6 +22,17 @@ class LedgerTests(unittest.TestCase):
         self.root = Path(self.fixture.name).resolve()
         self.path = self.root / 'ledger.json'
 
+    def test_running_installed_copy_leaves_no_bytecode(self):
+        scripts = self.root / 'skill' / 'scripts'
+        scripts.mkdir(parents=True)
+        for name in ('task_ledger.py', 'ct_storage.py'):
+            (scripts / name).write_bytes((HELPER.parent / name).read_bytes())
+        env = {k: v for k, v in __import__('os').environ.items() if k != 'PYTHONDONTWRITEBYTECODE'}
+        result = subprocess.run([sys.executable, str(scripts / 'task_ledger.py'), '--help'], env=env,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((scripts / '__pycache__').exists())
+
     def initial(self, gated=False):
         return {'schema_version': 1, 'task_id': 'task', 'project_root': str(self.root),
                 'operating_state': 'ACTIVE',

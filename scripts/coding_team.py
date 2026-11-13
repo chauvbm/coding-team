@@ -368,7 +368,8 @@ def _parser():
 # --- subcommands ---------------------------------------------------------------------------
 
 def _context(args, env, home):
-    return dict(scope=args.scope, env=env, home=home, project_dir=args.project_dir)
+    project_dir = None if args.project_dir is None else Path(os.path.abspath(args.project_dir))
+    return dict(scope=args.scope, env=env, home=home, project_dir=project_dir)
 
 
 def _install(args, env, home):
@@ -404,7 +405,7 @@ def _policy(args, env, home):
         result = ct_policy.describe(ct_policy.load_state(state), chat_id)
     else:
         result = ct_policy.apply_command(state, args.text, chat_id)
-    return dict(result, platform=cfg['platform']), 0
+    return dict(result, platform=cfg['platform'], state_path=Path(state).as_posix()), 0
 
 
 def _doctor(args, env, home):

@@ -11,6 +11,9 @@ from pathlib import Path, PureWindowsPath
 import stat
 import sys
 
+# An installed copy must not leave scripts/__pycache__ behind (it would block uninstall).
+sys.dont_write_bytecode = True
+
 try:
     from ct_storage import locked, atomic_write
 except ImportError:  # also support importlib-based test consumers

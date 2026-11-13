@@ -74,6 +74,7 @@ class CliTests(unittest.TestCase):
         code, data, _ = self.run_cli('status', '--platform', 'claude-code', env=session)
         self.assertEqual(code, 0, data)
         self.assertEqual((data['chat_id'], data['effective_policy']), ('s1', 'ON'))
+        self.assertEqual(data['state_path'], self.state.as_posix())
         code, data, _ = self.run_cli('command', '/coding-team off', '--platform', 'claude-code', env=session)
         self.assertEqual(code, 0, data)
         self.assertEqual(data['effective_policy'], 'OFF')
@@ -84,6 +85,22 @@ class CliTests(unittest.TestCase):
         code, data, _ = self.run_cli('status', '--platform', 'claude-code', '--chat-id', 'other',
                                      '--state', self.state, env=session)
         self.assertEqual((code, data['chat_id'], data['effective_policy']), (0, 'other', 'ON'))
+
+    def test_relative_project_dir_is_stored_absolute(self):
+        work, other = self.root / 'work', self.root / 'other'
+        work.mkdir()
+        other.mkdir()
+        code, data, _ = self.run_cli('install', '--platform', 'claude-code', '--scope', 'project',
+                                     '--project-dir', 'proj', cwd=work)
+        self.assertEqual(code, 0, data)
+        self.assertTrue((work / 'proj/.claude/agents/ct-architect.md').is_file())
+        self.assertNotIn('"proj/', json.dumps(data).replace(work.as_posix(), ''))
+        code, data, _ = self.run_cli('uninstall', '--platform', 'claude-code', '--scope', 'project',
+                                     '--project-dir', work / 'proj', cwd=other)
+        self.assertEqual(code, 0, data)
+        self.assertEqual([p for p in (work / 'proj').rglob('*') if p.is_file()], [])
+        self.assertFalse((work / 'proj/.claude/skills').exists())
+        self.assertFalse((work / 'proj/.claude/agents').exists())
 
     def test_ambiguous_platform_detection(self):
         both = {'CLAUDECODE': '1', 'CODEX_THREAD_ID': 'thread-1'}
