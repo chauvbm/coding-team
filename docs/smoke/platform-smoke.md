@@ -14,7 +14,7 @@ Rules for every run:
 From a clean checkout of the commit under test (record `git rev-parse HEAD`):
 
 1. Copy [result-template.json](result-template.json) to a scratch location and fill `platform`, `runtime_version` (the runtime's own version output), `date` (`YYYY-MM-DD`) and `source_commit`.
-2. Create a throwaway project and install into it with project scope. Project scope writes the skill and the agents into that project, plus lock and backup directories under the user config root (`<config_root>/coding-team/backups/<timestamp>`, `install.lock.lock`); it touches no state file or rules file, so it never changes your global default:
+2. Create a throwaway project and install into it with project scope. Project scope writes the skill and the agents into that project, plus a lock file (`install.lock.lock`) under `<config_root>/coding-team/`, and a backup directory only when an existing file is replaced; no state file or rules file is touched, so it never changes your global default:
 
    ```sh
    mkdir /tmp/ct-smoke && cd /tmp/ct-smoke && git init
