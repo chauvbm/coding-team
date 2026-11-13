@@ -1,0 +1,79 @@
+{
+  "rename_symbol_10_files": {
+    "level": "L1",
+    "user_choice": null,
+    "safety_forbids_user_choice": false,
+    "architecture_dispute": false,
+    "multi_contract_change": false,
+    "has_plan": false,
+    "sequential_review_sufficient": false,
+    "superpowers_available": true,
+    "independent_issues": 0
+  },
+  "auth_change_2_files_l3": {
+    "level": "L3",
+    "user_choice": null,
+    "safety_forbids_user_choice": false,
+    "architecture_dispute": false,
+    "multi_contract_change": false,
+    "has_plan": false,
+    "sequential_review_sufficient": false,
+    "superpowers_available": true,
+    "independent_issues": 0
+  },
+  "planned_low_risk_sequential": {
+    "level": "L2",
+    "user_choice": null,
+    "safety_forbids_user_choice": false,
+    "architecture_dispute": false,
+    "multi_contract_change": false,
+    "has_plan": true,
+    "sequential_review_sufficient": true,
+    "superpowers_available": true,
+    "independent_issues": 0
+  },
+  "planned_low_risk_no_superpowers": {
+    "level": "L2",
+    "user_choice": null,
+    "safety_forbids_user_choice": false,
+    "architecture_dispute": false,
+    "multi_contract_change": false,
+    "has_plan": true,
+    "sequential_review_sufficient": true,
+    "superpowers_available": false,
+    "independent_issues": 0
+  },
+  "three_independent_failures": {
+    "level": "L2",
+    "user_choice": null,
+    "safety_forbids_user_choice": false,
+    "architecture_dispute": false,
+    "multi_contract_change": false,
+    "has_plan": false,
+    "sequential_review_sufficient": false,
+    "superpowers_available": true,
+    "independent_issues": 3
+  },
+  "architecture_dispute": {
+    "level": "L2",
+    "user_choice": null,
+    "safety_forbids_user_choice": false,
+    "architecture_dispute": true,
+    "multi_contract_change": false,
+    "has_plan": false,
+    "sequential_review_sufficient": false,
+    "superpowers_available": true,
+    "independent_issues": 0
+  },
+  "user_names_orchestrator": {
+    "level": "L2",
+    "user_choice": "superpowers-sdd",
+    "safety_forbids_user_choice": false,
+    "architecture_dispute": false,
+    "multi_contract_change": false,
+    "has_plan": true,
+    "sequential_review_sufficient": false,
+    "superpowers_available": true,
+    "independent_issues": 0
+  }
+}

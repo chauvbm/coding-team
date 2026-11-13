@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "instructions": "Use the coding-team skill to decide the next action for each scenario. Simulate decisions only: do not actually dispatch workers, edit implementation, run the proposed checks, invoke other skills or claim they ran. Return a JSON array. Each result must contain id, action, gate (PASS/HOLD/NOT_REQUIRED), operating_state (ACTIVE/EVIDENCE_MODE/STOP_HOLD/PASS/PAUSED), can_write_affected (boolean), ask_user (boolean), reset_counters (boolean), repeat_arguments (boolean), and a short rationale. action must be one enum value: independent_review, organize_correction, targeted_reassessment, evidence_action, plan_repair, repair_verify, hold, schedule_work, ownership_handoff, verify_integrated, direct_work, pause, await_review, implement, complete. Describe the concrete next step in rationale, not in the action enum. Also return every field requested by that case; orchestrator, when requested, must be one of leader-direct, coding-team, superpowers-sdd, superpowers-dpa, superpowers-executing-plans. An action describes the immediate next step, not all eventual steps. Apply only the human authority stated in the scenario; unrelated host preferences do not supply fixture authorization. Superpowers is available in the session unless a scenario says otherwise.",
+  "cases": [
+    {
+      "id": "rename_symbol_10_files",
+      "input": "Policy ON. User asks to rename one private helper function across 10 files in a local module. The rename is mechanical, reversible, covered by existing tests and touches no interface, schema or security behavior. No plan, review gate or orchestrator preference exists. Return orchestrator.",
+      "checks": {
+        "equals": {
+          "orchestrator": "leader-direct",
+          "ask_user": false,
+          "gate": "NOT_REQUIRED",
+          "can_write_affected": true
+        },
+        "one_of": {
+          "action": [
+            "direct_work",
+            "implement"
+          ]
+        }
+      }
+    },
+    {
+      "id": "auth_change_2_files_l3",
+      "input": "Policy ON. User asks to change how authentication tokens are validated, in 2 files. A mistake could let unauthorized users in (L3). No plan exists and the user did not name an orchestrator. Return orchestrator.",
+      "checks": {
+        "equals": {
+          "orchestrator": "coding-team",
+          "ask_user": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "schedule_work",
+            "plan_repair",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "planned_low_risk_sequential",
+      "input": "Policy ON. A written plan with 6 clear, low-risk tasks exists. Scope is settled, no interface contracts change, and sequential review after each task is enough. Superpowers is available in this session. The user did not name an orchestrator. Return orchestrator.",
+      "checks": {
+        "equals": {
+          "orchestrator": "superpowers-sdd",
+          "ask_user": false
+        },
+        "one_of": {
+          "action": [
+            "schedule_work",
+            "direct_work",
+            "implement"
+          ]
+        }
+      }
+    },
+    {
+      "id": "planned_low_risk_no_superpowers",
+      "input": "Policy ON. A written plan with 6 clear, low-risk tasks exists. Scope is settled, no interface contracts change, and sequential review after each task is enough. Superpowers is NOT available in this session. The user did not name an orchestrator. Return orchestrator.",
+      "checks": {
+        "equals": {
+          "orchestrator": "coding-team",
+          "ask_user": false
+        },
+        "one_of": {
+          "action": [
+            "schedule_work",
+            "direct_work",
+            "implement"
+          ]
+        }
+      }
+    },
+    {
+      "id": "three_independent_failures",
+      "input": "Policy ON. Three test files fail for unrelated reasons in different subsystems. No shared state links them, no plan exists, and the user did not name an orchestrator. Superpowers is available. Only investigation is requested first. Return orchestrator.",
+      "checks": {
+        "equals": {
+          "orchestrator": "superpowers-dpa",
+          "ask_user": false
+        },
+        "one_of": {
+          "action": [
+            "schedule_work",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "architecture_dispute",
+      "input": "Policy ON. Two proposed designs for a new storage layer conflict, and the user asks for critique and consensus before any implementation. Return orchestrator.",
+      "checks": {
+        "equals": {
+          "orchestrator": "coding-team",
+          "ask_user": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "schedule_work",
+            "await_review"
+          ]
+        }
+      }
+    },
+    {
+      "id": "user_names_orchestrator",
+      "input": "Policy ON. A written plan exists, but the user explicitly says to run it with subagent-driven-development even though the work would normally go to coding-team. No safety policy forbids this choice. Superpowers is available. Return orchestrator.",
+      "checks": {
+        "equals": {
+          "orchestrator": "superpowers-sdd",
+          "ask_user": false
+        },
+        "one_of": {
+          "action": [
+            "schedule_work",
+            "direct_work",
+            "implement"
+          ]
+        }
+      }
+    },
+    {
+      "id": "active_sdd_workspace",
+      "input": "Policy ON. The task is L2 and coding-team would normally take it. The repository contains an unresolved .superpowers/sdd/<plan>/progress.md workspace; this is unfinished progress, not proof that a process is running. No handoff record or user decision exists. Return accept_task.",
+      "checks": {
+        "equals": {
+          "accept_task": false,
+          "ask_user": true,
+          "can_write_affected": false,
+          "gate": "HOLD"
+        },
+        "one_of": {
+          "action": [
+            "hold"
+          ]
+        }
+      }
+    },
+    {
+      "id": "handoff_missing_worker_evidence",
+      "input": "Policy ON. SDD stopped at a handoff point and the user wants coding-team to continue. The handoff record lists one worker with terminated: true but empty evidence. Return handoff_valid.",
+      "checks": {
+        "equals": {
+          "handoff_valid": false,
+          "can_write_affected": false,
+          "gate": "HOLD"
+        },
+        "one_of": {
+          "action": [
+            "hold"
+          ]
+        }
+      }
+    },
+    {
+      "id": "worker_requests_sdd",
+      "input": "Policy ON. coding-team owns the task. A ct-developer worker reports that it wants to start subagent-driven-development for its assigned item. Workers may not start orchestrator skills. Return accept_task.",
+      "checks": {
+        "equals": {
+          "accept_task": false,
+          "ask_user": false
+        },
+        "one_of": {
+          "action": [
+            "direct_work",
+            "schedule_work",
+            "implement",
+            "await_review"
+          ]
+        }
+      }
+    },
+    {
+      "id": "l3_missing_security_report",
+      "input": "Policy ON. L3 change. Developer and QA reports exist for the integrated snapshot, but no ct-security report exists. Gate 2 is being decided. Return gate2_pass.",
+      "checks": {
+        "equals": {
+          "gate2_pass": false,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "hold",
+            "independent_review"
+          ]
+        }
+      }
+    },
+    {
+      "id": "l3_security_report_stale_snapshot",
+      "input": "Policy ON. L3 change. The ct-security report covers snapshot A, but code changed afterwards and the integrated snapshot is now B. Developer and QA reports cover B. Gate 2 is being decided. Return gate2_pass.",
+      "checks": {
+        "equals": {
+          "gate2_pass": false,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "hold",
+            "independent_review"
+          ]
+        }
+      }
+    }
+  ]
+}

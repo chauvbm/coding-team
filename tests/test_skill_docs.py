@@ -1,0 +1,115 @@
+"""Documentation consistency checks for SKILL.md, references, role files and the README.
+
+These are static text checks (kind a: docs/schema). They say nothing about agent behaviour.
+"""
+import re
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+
+import ct_roles  # noqa: E402
+
+LEGACY_BLOCK = re.compile(r'<!--\s*legacy-migration\s*-->.*?<!--\s*/legacy-migration\s*-->', re.S)
+LINK = re.compile(r'(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+FENCE = re.compile(r'^(```|~~~).*?^\1[^\n]*$', re.S | re.M)
+CODE_SPAN = re.compile(r'`[^`\n]*`')
+
+
+def read(path):
+    return Path(path).read_text(encoding='utf-8')
+
+
+def doc_files(include_readme=True):
+    """SKILL.md, references/*.md, agents/roles/*.md and (optionally) README.md."""
+    files = [ROOT / 'SKILL.md']
+    files += sorted((ROOT / 'references').glob('*.md'))
+    files += sorted((ROOT / 'agents' / 'roles').glob('*.md'))
+    if include_readme:
+        files.append(ROOT / 'README.md')
+    return [path for path in files if path.exists()]
+
+
+class SkillDocsTests(unittest.TestCase):
+    def test_role_ids_documented(self):
+        """(a) docs: SKILL.md and the agent contracts name every shipped role id and variant."""
+        roles = ct_roles.load_roles(ROOT / 'agents' / 'roles')
+        self.assertTrue(roles)
+        skill = read(ROOT / 'SKILL.md')
+        contracts = read(ROOT / 'references' / 'agent-contracts.md')
+        for role_id, role in roles.items():
+            with self.subTest(role=role_id):
+                self.assertIn(role_id, skill)
+                self.assertIn(role_id, contracts)
+                for variant in role['variants']:
+                    self.assertIn(variant, contracts)
+
+    def test_no_legacy_command_syntax(self):
+        """(a) docs: old command syntax appears only inside the legacy-migration block."""
+        files = doc_files(include_readme=False)
+        self.assertGreater(len(files), 5)
+        saw_block = False
+        for path in files:
+            raw = read(path)
+            saw_block = saw_block or bool(LEGACY_BLOCK.search(raw))
+            text = LEGACY_BLOCK.sub('', raw)
+            self.assertNotIn('<!-- legacy-migration', text, '%s: unbalanced legacy-migration markers' % path.name)
+            self.assertNotIn('<!-- /legacy-migration', text, '%s: unbalanced legacy-migration markers' % path.name)
+            for needle in ('/coding team ', 'on all', 'off all', '`inherit`'):
+                with self.subTest(file=path.name, needle=needle):
+                    self.assertNotIn(needle, text)
+        self.assertTrue(saw_block, 'the legacy-migration block was not found in any doc')
+
+    def test_skill_is_platform_neutral(self):
+        """(a) docs: SKILL.md names no platform or platform-only tool; platform detail lives in references."""
+        text = read(ROOT / 'SKILL.md')
+        for pattern in (r'claude', r'codex', r'antigravity', r'gemini', r'CLAUDE\.md', r'AGENTS\.md',
+                        r'spawn_agent', r'subagent_type', r'WebFetch', r'WebSearch', r'\.claude/',
+                        r'\.codex/', r'\.gemini/'):
+            with self.subTest(pattern=pattern):
+                self.assertIsNone(re.search(pattern, text, re.I if pattern.islower() else 0))
+
+    def test_relative_links_resolve(self):
+        """(a) docs: every relative markdown link targets an existing file (and anchors an existing heading)."""
+        checked = 0
+        for path in doc_files(include_readme=False):
+            text = CODE_SPAN.sub('', FENCE.sub('', read(path)))
+            for target in LINK.findall(text):
+                if re.match(r'^[a-z][a-z0-9+.-]*:', target, re.I) or target.startswith('#'):
+                    continue
+                relative, _, anchor = target.partition('#')
+                resolved = (path.parent / relative).resolve()
+                with self.subTest(file=path.name, link=target):
+                    self.assertTrue(resolved.is_file(), 'broken link %s in %s' % (target, path.name))
+                    if anchor and resolved.suffix == '.md':
+                        self.assertIn(anchor, heading_slugs(read(resolved)))
+                checked += 1
+        self.assertGreater(checked, 5)
+
+    def test_orchestration_doc_states_advisory_and_limits(self):
+        """(a) docs: orchestration.md says routing is ADVISORY, evidence is caller-asserted, and keeps row order."""
+        text = read(ROOT / 'references' / 'orchestration.md')
+        for phrase in ('ADVISORY', 'caller-asserted', 'not a running process'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+        lowered = text.lower()
+        positions = [lowered.find(word.lower()) for word in ('L3', 'architect', 'interface', 'independent',
+                                                              'plan', 'small')]
+        self.assertNotIn(-1, positions)
+        self.assertEqual(sorted(positions), positions, 'routing conditions out of order: %s' % positions)
+
+
+def heading_slugs(markdown):
+    slugs = set()
+    for line in FENCE.sub('', markdown).splitlines():
+        match = re.match(r'^#{1,6}\s+(.*?)\s*#*\s*$', line)
+        if match:
+            slug = re.sub(r'[^\w\- ]', '', match.group(1).lower().replace('`', '')).strip().replace(' ', '-')
+            slugs.add(slug)
+    return slugs
+
+
+if __name__ == '__main__':
+    unittest.main()
