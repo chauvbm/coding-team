@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import secrets
 import subprocess
@@ -41,24 +42,64 @@ class OrchestrationConflict(ValueError):
 
 # --- locations ---------------------------------------------------------------------------------
 
-def _git_worktrees(workspace):
-    """Worktree roots from git (main first), or None when git is unavailable or this is no repo."""
-    base = ['git', '-C', str(workspace), 'worktree', 'list', '--porcelain']
-    for command, separator in ((base + ['-z'], '\0'), (base, '\n')):
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=10,
-                                    encoding='utf-8', errors='surrogateescape')
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode == 0:
-            break
-    else:
+class OrchestrationLocationError(ValueError):
+    """The shared state location cannot be determined safely; nothing was written."""
+
+
+_GIT_ENV = {'LC_ALL': 'C', 'LANGUAGE': 'C'}
+
+
+def _run_git(command):
+    """Run git; None means git is not installed. Timeouts and other OS errors fail closed."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=10, encoding='utf-8',
+                              errors='surrogateescape', env=dict(os.environ, **_GIT_ENV))
+    except FileNotFoundError:
         return None
-    roots = []
+    except subprocess.TimeoutExpired as error:
+        raise OrchestrationLocationError('git timed out locating the main worktree; refusing to guess a '
+                                         'per-worktree state file: %s' % ' '.join(command)) from error
+    except OSError as error:
+        raise OrchestrationLocationError('git could not be run to locate the main worktree: %s' % error) from error
+
+
+def _has_git_entry(workspace):
+    path = Path(os.path.abspath(workspace))
+    return any(os.path.lexists(candidate / '.git') for candidate in (path, *path.parents))
+
+
+def _git_worktrees(workspace):
+    """Worktree roots from git (main first), or None for a workspace that is definitely not in a repo.
+
+    Falls back (None) only when git is missing or reports "not a git repository", and no ``.git`` entry
+    exists in the workspace or any ancestor. Every other git failure raises, so two sessions can never
+    silently use different state files for the same repository.
+    """
+    base = ['git', '-C', str(workspace), 'worktree', 'list', '--porcelain']
+    separator = '\0'
+    result = _run_git(base + ['-z'])
+    if result is not None and result.returncode != 0 and 'unknown switch' in result.stderr:
+        separator = '\n'
+        result = _run_git(base)
+    if result is None or result.returncode != 0:
+        not_repo = result is None or 'not a git repository' in result.stderr.lower()
+        if not_repo and not _has_git_entry(workspace):
+            return None
+        detail = 'git is not installed' if result is None else (result.stderr.strip() or 'exit %d' % result.returncode)
+        raise OrchestrationLocationError('cannot locate the main worktree for %s; refusing to fall back to a '
+                                         'per-worktree state file: %s' % (workspace, detail))
+    entries = []
     for line in result.stdout.split(separator):
         if line.startswith('worktree '):
-            roots.append(Path(_unquote(line[len('worktree '):])))
-    return roots or None
+            entries.append({'path': Path(_unquote(line[len('worktree '):])), 'bare': False})
+        elif line == 'bare' and entries:
+            entries[-1]['bare'] = True
+    if not entries:
+        raise OrchestrationLocationError('git listed no worktrees for %s' % workspace)
+    if entries[0]['bare']:
+        raise OrchestrationLocationError('bare main worktree unsupported: state would land inside the git '
+                                         'directory %s' % entries[0]['path'])
+    return [entry['path'] for entry in entries if not entry['bare']]
 
 
 def _unquote(value):
@@ -339,7 +380,7 @@ def validate_handoff(record: dict, current: dict | None, unresolved: list[str], 
 
 
 def handoff(workspace, record, *, session_id) -> dict:
-    """Validate and apply a handoff. A coding-team destination receives the new owner token."""
+    """Validate and apply a handoff. The result carries the newly issued owner token."""
     try:
         stored = json.loads(json.dumps(record))
     except (TypeError, ValueError) as error:
@@ -367,8 +408,7 @@ def handoff(workspace, record, *, session_id) -> dict:
         _save(path, state)
         result = dict(_public(task_id, updated), termination_evidence=TERMINATION_EVIDENCE,
                       from_verified=current is not None)
-        if stored['to'] == 'coding-team':
-            result['token'] = new_token
+        result['token'] = new_token
         return result
 
 

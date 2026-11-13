@@ -21,6 +21,9 @@ BASE_FACTS = {
     'sequential_review_sufficient': False, 'superpowers_available': True, 'independent_issues': 0,
 }
 
+NOT_A_REPO = subprocess.CompletedProcess(
+    ['git'], 128, '', 'fatal: not a git repository (or any of the parent directories): .git\n')
+
 
 def make_sdd(workspace, plan='plan-a'):
     progress = Path(workspace) / '.superpowers' / 'sdd' / plan / 'progress.md'
@@ -70,19 +73,22 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn(progress, caught.exception.blockers)
         self.assertNotIn('task-1', orch.status(self.ws)['tasks'])
 
-    def test_ownership_shared_across_worktrees(self):
+    def git(self, *args, cwd):
+        subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=30)
+
+    def make_repo(self, name='main'):
         if shutil.which('git') is None:
             self.skipTest('git is not installed')
-        main = self.root / 'main'
+        main = self.root / name
         main.mkdir()
+        self.git('init', '-q', cwd=main)
+        self.git('-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
+                 'commit', '-q', '--allow-empty', '-m', 'initial', cwd=main)
+        return main
 
-        def git(*args, cwd=main):
-            subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=30)
-
-        git('init', '-q')
-        git('-c', 'user.email=test@example.invalid', '-c', 'user.name=Test',
-            'commit', '-q', '--allow-empty', '-m', 'initial')
-        git('worktree', 'add', '-q', '../wt-b')
+    def test_ownership_shared_across_worktrees(self):
+        main = self.make_repo()
+        self.git('worktree', 'add', '-q', '../wt-b', cwd=main)
         wt_b = self.root / 'wt-b'
         expected = main / '.coding-team' / 'orchestration.json'
         self.assertEqual(orch.orchestration_file(wt_b).resolve(), expected.resolve())
@@ -171,11 +177,12 @@ class OrchestrationTests(unittest.TestCase):
         first = orch.claim(self.ws, 'task-1', 'AUTO', 'gate-1', session_id='A')
         handed = orch.handoff(self.ws, handoff_record(
             **{'from': 'coding-team', 'to': 'superpowers-dpa', 'token': first['token']}), session_id=None)
-        self.assertNotIn('token', handed)
+        self.assertEqual(len(handed['token']), 32)
         taken = orch.takeover(self.ws, 'task-1', session_id='C', reason='resume', user_confirmed=True)
         report = orch.status(self.ws, 'task-1')
         text = json.dumps(report)
-        for token in (first['token'], taken['token'], self.state()['tasks']['task-1']['owner_token']):
+        for token in (first['token'], handed['token'], taken['token'],
+                      self.state()['tasks']['task-1']['owner_token']):
             self.assertNotIn(token, text)
         self.assertNotIn('owner_token', text)
         view = report['tasks']['task-1']
@@ -216,6 +223,7 @@ class OrchestrationTests(unittest.TestCase):
                                   None, unresolved, session_id=None)
         self.assertIn('acknowledged_sdd', str(caught.exception))
 
+        (self.ws / 'other').mkdir()
         first = orch.claim(self.ws / 'other', 'task-1', 'AUTO', 'gate-1', session_id='A')
         current = self.state(self.ws / 'other')['tasks']['task-1']
         owned = handoff_record(**{'from': 'coding-team', 'to': 'superpowers-sdd'})
@@ -254,13 +262,78 @@ class OrchestrationTests(unittest.TestCase):
         back = orch.handoff(self.ws, handoff_record(**{'from': 'coding-team', 'to': 'superpowers-sdd',
                                                      'token': result['token']}), session_id=None)
         self.assertIs(back['from_verified'], True)
-        self.assertNotIn('token', back)
+        self.assertNotEqual(back['token'], result['token'])
         self.assertEqual(back['generation'], 2)
         stored = self.state()['tasks']['task-1']
         self.assertNotIn('token', stored['handoff_record'])
         self.assertEqual(stored['history'][0]['generation'], 1)
         with self.assertRaises(orch.OrchestrationConflict):
             orch.claim(self.ws, 'task-1', 'AUTO', 'gate-2', session_id=None, token=result['token'])
+
+    def test_sessionless_round_trip_through_sdd(self):
+        first = orch.claim(self.ws, 'task-1', 'AUTO', 'gate-1', session_id=None)
+        to_sdd = orch.handoff(self.ws, handoff_record(**{'from': 'coding-team', 'to': 'superpowers-sdd',
+                                                       'token': first['token']}), session_id=None)
+        self.assertEqual((to_sdd['orchestrator'], to_sdd['owner_session_id'], to_sdd['from_verified']),
+                         ('superpowers-sdd', None, True))
+        with self.assertRaises(orch.OrchestrationConflict):
+            orch.handoff(self.ws, handoff_record(user_confirmed=True), session_id=None)
+        back = orch.handoff(self.ws, handoff_record(token=to_sdd['token']), session_id=None)
+        self.assertEqual((back['orchestrator'], back['generation'], back['from_verified']),
+                         ('coding-team', 3, True))
+        with self.assertRaises(orch.OrchestrationConflict):
+            orch.claim(self.ws, 'task-1', 'AUTO', 'gate-2', session_id=None, token=to_sdd['token'])
+        claimed = orch.claim(self.ws, 'task-1', 'AUTO', 'gate-2', session_id=None, token=back['token'])
+        self.assertEqual(claimed['phase'], 'gate-2')
+        self.assertEqual([entry['orchestrator'] for entry in self.state()['tasks']['task-1']['history']],
+                         ['coding-team', 'superpowers-sdd'])
+
+    def test_git_failures_fail_closed(self):
+        main = self.make_repo()
+        self.git('worktree', 'add', '-q', '../wt', cwd=main)
+        wt = self.root / 'wt'
+        orch.claim(main, 'task-1', 'AUTO', 'gate-1', session_id='A')
+        dubious = subprocess.CompletedProcess(
+            ['git'], 128, '', "fatal: detected dubious ownership in repository at '%s'\n" % wt)
+        failures = {
+            'dubious ownership': dict(return_value=dubious),
+            'timeout': dict(side_effect=subprocess.TimeoutExpired(['git'], 10)),
+            'permission': dict(side_effect=PermissionError('denied')),
+            'not-a-repo with .git present': dict(return_value=NOT_A_REPO),
+            'git missing with .git present': dict(side_effect=FileNotFoundError('git')),
+        }
+        for label, behaviour in failures.items():
+            with self.subTest(failure=label):
+                with mock.patch.object(orch.subprocess, 'run', **behaviour):
+                    with self.assertRaises(orch.OrchestrationLocationError) as caught:
+                        orch.claim(wt, 'task-1', 'AUTO', 'gate-1', session_id='B')
+                    with self.assertRaises(orch.OrchestrationLocationError):
+                        orch.status(wt, 'task-1')
+                if label == 'dubious ownership':
+                    self.assertIn('dubious ownership', str(caught.exception))
+                self.assertFalse((wt / '.coding-team').exists())
+        self.assertEqual(self.state(main)['tasks']['task-1']['owner_session_id'], 'A')
+
+    def test_missing_git_or_not_a_repo_outside_any_repo_falls_back(self):
+        expected = (self.ws / '.coding-team' / 'orchestration.json').resolve()
+        for label, behaviour in {'git missing': dict(side_effect=FileNotFoundError('git')),
+                                 'not a repo': dict(return_value=NOT_A_REPO)}.items():
+            with self.subTest(case=label):
+                with mock.patch.object(orch.subprocess, 'run', **behaviour):
+                    self.assertEqual(orch.orchestration_file(self.ws).resolve(), expected)
+                    self.assertEqual(orch.unresolved_sdd_workspaces(self.ws), [])
+        with mock.patch.object(orch.subprocess, 'run', side_effect=FileNotFoundError('git')):
+            orch.claim(self.ws, 'task-1', 'AUTO', 'gate-1', session_id='A')
+        self.assertTrue(expected.is_file())
+
+    def test_bare_main_worktree_rejected(self):
+        source = self.make_repo('source')
+        self.git('clone', '-q', '--bare', str(source), str(self.root / 'main.git'), cwd=self.root)
+        self.git('worktree', 'add', '-q', str(self.root / 'wt'), cwd=self.root / 'main.git')
+        with self.assertRaises(orch.OrchestrationLocationError) as caught:
+            orch.claim(self.root / 'wt', 'task-1', 'AUTO', 'gate-1', session_id='A')
+        self.assertIn('bare main worktree unsupported', str(caught.exception))
+        self.assertFalse(list(self.root.rglob('.coding-team')))
 
     def test_route_order(self):
         def route(**facts):
