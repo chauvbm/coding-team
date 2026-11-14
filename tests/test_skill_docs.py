@@ -114,7 +114,7 @@ class SkillDocsTests(unittest.TestCase):
         for platform in ('claude-code', 'codex', 'antigravity'):
             with self.subTest(platform=platform):
                 self.assertIn('install --platform %s --dry-run' % platform, text)
-                self.assertIn('install --platform %s --default on --global-rules' % platform, text)
+                self.assertIn('install --platform %s --default on' % platform, text)
         self.assertNotIn('| verified |', text.lower(), 'no platform may be claimed verified without a smoke record')
 
     def test_smoke_result_template_shape(self):

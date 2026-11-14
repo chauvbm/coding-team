@@ -13,8 +13,8 @@ Requires Git and Python 3.11 or newer (standard library only). Installation is d
 Always preview first: `install --dry-run` lists every path it would write, back up or remove, plus conflicts, and creates nothing (no file, directory, lock, staging or backup). Then run the real install. Options:
 
 - `--default on|off` sets the global ON/OFF default (state is user-level). Without it, existing state is kept; a new state starts ON.
-- `--global-rules` writes a marked block (`<!-- coding-team-policy:start -->` ... `<!-- coding-team-policy:end -->`) into the platform's global rules file so the Leader handles `/coding-team` controls and routing even before selecting the skill. Bytes outside the markers are never changed. The block embeds the Python executable used at install time (`sys.executable`); re-run `install --global-rules` after changing or removing that Python or virtual environment. On Windows it carries both a PowerShell form and a Git Bash / POSIX form of each command.
-- `--scope project --project-dir DIR` installs only the skill and agents into one project, plus a lock file (`install.lock.lock`) under `<config_root>/coding-team/`, and a backup directory only when an existing file is replaced; no state file or rules file is touched. It cannot be combined with `--default` or `--global-rules`; the ON/OFF state stays user-level. A project-only install therefore has no state file: `/coding-team on|off` (including `--global`) fail until a user-scope install has run.
+- A user-scope install writes the rules block by default, so the Leader uses coding-team automatically on Claude Code, Codex and Antigravity; pass `--no-global-rules` to skip it. The block (`--global-rules`, now the default) is a marked block (`<!-- coding-team-policy:start -->` ... `<!-- coding-team-policy:end -->`) into the platform's global rules file so the Leader handles `/coding-team` controls and routing even before selecting the skill. Bytes outside the markers are never changed. The block embeds the Python executable used at install time (`sys.executable`); re-run `install --global-rules` after changing or removing that Python or virtual environment. On Windows it carries both a PowerShell form and a Git Bash / POSIX form of each command.
+- `--scope project --project-dir DIR` installs only the skill and agents into one project, plus a lock file (`install.lock.lock`) under `<config_root>/coding-team/`, and a backup directory only when an existing file is replaced; no state file or rules file is touched. It cannot be combined with `--default` or an explicit `--global-rules` (project scope never writes rules); the ON/OFF state stays user-level. A project-only install therefore has no state file: `/coding-team on|off` (including `--global`) fail until a user-scope install has run.
 
 Every CLI call prints exactly one JSON object; exit 0 = success, 1 = valid but negative, 2 = error or conflict. Start a fresh chat after installing so the platform loads the new skill and agents. The examples use `python`; use your actual interpreter (for example `python3`), and in PowerShell quote paths with spaces and use the call operator (`& 'C:\path\python.exe' 'C:\src\coding-team\scripts\coding_team.py' ...`).
 
@@ -25,7 +25,7 @@ Installs into `CLAUDE_CONFIG_DIR` (default `~/.claude`): skill in `skills/coding
 ```sh
 git clone https://github.com/chauvbm/coding-team.git ~/src/coding-team
 python ~/src/coding-team/scripts/coding_team.py install --platform claude-code --dry-run
-python ~/src/coding-team/scripts/coding_team.py install --platform claude-code --default on --global-rules
+python ~/src/coding-team/scripts/coding_team.py install --platform claude-code --default on
 ```
 
 Optional documentation MCP for `ct-researcher` (Claude Code only, repeatable). For example, with the Context7 MCP server configured in Claude Code:
@@ -44,7 +44,7 @@ Installs the skill into `~/.agents/skills/coding-team` and agents, rules block (
 ```sh
 git clone https://github.com/chauvbm/coding-team.git ~/src/coding-team
 python ~/src/coding-team/scripts/coding_team.py install --platform codex --dry-run
-python ~/src/coding-team/scripts/coding_team.py install --platform codex --default on --global-rules
+python ~/src/coding-team/scripts/coding_team.py install --platform codex --default on
 ```
 
 On Codex the commands may also be written with the `$coding-team` prefix. The installed `agents/openai.yaml` keeps implicit invocation enabled; leave it that way so the ON/OFF controls stay reachable while coding-team is OFF. Codex role files carry no model (`static_agent_model: omit`): the Leader passes the tier's model at spawn, because a model in the agent TOML would win over it.
@@ -56,7 +56,7 @@ Installs under `~/.gemini`: skill in `config/skills/coding-team`, agents in `con
 ```sh
 git clone https://github.com/chauvbm/coding-team.git ~/src/coding-team
 python ~/src/coding-team/scripts/coding_team.py install --platform antigravity --dry-run
-python ~/src/coding-team/scripts/coding_team.py install --platform antigravity --default on --global-rules
+python ~/src/coding-team/scripts/coding_team.py install --platform antigravity --default on
 ```
 
 ### Runtime-only package

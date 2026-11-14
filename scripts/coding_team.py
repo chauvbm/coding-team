@@ -321,7 +321,7 @@ def _parser():
     item.add_argument('--platform', choices=PLATFORMS, required=True)
     scoped(item)
     item.add_argument('--default', choices=('on', 'off'))
-    item.add_argument('--global-rules', action='store_true')
+    item.add_argument('--global-rules', action=argparse.BooleanOptionalAction, default=None)
     item.add_argument('--docs-mcp', action='append', default=[], metavar='NAME')
     item.add_argument('--dry-run', action='store_true')
     item.add_argument('--replace-unmanaged', action='store_true')
@@ -376,14 +376,14 @@ def _install(args, env, home):
     cfg = _config(args.platform)
     if args.recover:
         extra = [flag for flag, value in (('--dry-run', args.dry_run), ('--default', args.default),
-                                           ('--global-rules', args.global_rules), ('--docs-mcp', args.docs_mcp),
+                                           ('--global-rules', args.global_rules is not None), ('--docs-mcp', args.docs_mcp),
                                            ('--replace-unmanaged', args.replace_unmanaged),
                                            ('--overwrite-modified', args.overwrite_modified)) if value]
         if extra:
             raise CliError('--recover performs a real recovery and cannot be combined with '
                            + ', '.join(extra) + '; only --platform, --scope and --project-dir apply')
         return dict(ct_install.recover(cfg, **_context(args, env, home)), platform=cfg['platform']), 0
-    plan = ct_install.build_plan(SOURCE_ROOT, cfg, default=args.default, global_rules=args.global_rules,
+    plan = ct_install.build_plan(SOURCE_ROOT, cfg, default=args.default, global_rules=(args.scope == 'user') if args.global_rules is None else args.global_rules,
                                  python=sys.executable, docs_mcp=args.docs_mcp, **_context(args, env, home))
     result = ct_install.apply_plan(plan, dry_run=args.dry_run, replace_unmanaged=args.replace_unmanaged,
                                    overwrite_modified=args.overwrite_modified)

@@ -55,7 +55,7 @@ The `--global-rules` block already embeds correctly quoted commands for the host
 
 ```text
 coding_team.py install   --platform P [--scope user|project] [--project-dir DIR] [--default on|off]
-                         [--global-rules] [--docs-mcp NAME]... [--dry-run]
+                         [--global-rules | --no-global-rules] [--docs-mcp NAME]... [--dry-run]
                          [--replace-unmanaged] [--overwrite-modified]
 coding_team.py install   --platform P [--scope ...] [--project-dir DIR] --recover
 coding_team.py uninstall --platform P [--scope user|project] [--project-dir DIR] [--dry-run] [--remove-modified]
@@ -73,7 +73,7 @@ coding_team.py orchestrator {status|claim|takeover|handoff|release|route} ...
 - Installs the skill, the role agents and the platform config transactionally under one lock in the state directory: files are staged, every target that will be replaced is backed up to `backups/<timestamp>/` beside the state file, then replaced atomically, and a manifest with SHA-256 hashes is written. A normal Python error rolls back automatically and keeps the backup directory.
 - `--scope project` installs only the skill and agents into the project named by the required `--project-dir`. It cannot be combined with `--default` or `--global-rules`.
 - `--default on|off` changes only `global_policy`; chat overrides are kept. Without it, existing state is left unchanged.
-- `--global-rules` writes the marked block (`<!-- coding-team-policy:start -->` ... `:end -->`) into the platform's global rules file. It embeds exact `status`/`command` invocations and the short routing table. Bytes outside the markers are never changed.
+- `--global-rules` (the default for `--scope user`; `--no-global-rules` skips it) writes the marked block (`<!-- coding-team-policy:start -->` ... `:end -->`) into the platform's global rules file. It embeds exact `status`/`command` invocations and the short routing table. Bytes outside the markers are never changed.
 - `--docs-mcp NAME` (Claude Code only, repeatable) grants that MCP tool to `ct-researcher`; any MCP grant makes its `no_file_write` and `no_delegate` ADVISORY.
 - `--dry-run` reports what would change and creates nothing: no file, directory, lock, staging or backup.
 - A managed file the user edited (hash differs from the manifest) is a conflict by default; `--overwrite-modified` replaces it after backup.

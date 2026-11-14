@@ -67,6 +67,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, data)
         return data
 
+    def test_install_writes_rules_block_by_default(self):
+        data = self.install()
+        self.assertIn('rules_file', data)
+        text = Path(data['rules_file']).read_text(encoding='utf-8')
+        self.assertIn('coding-team-policy:start', text)
+
+    def test_install_no_global_rules_opt_out(self):
+        data = self.install('--no-global-rules')
+        self.assertIsNone(data['rules_file'])
+
     def test_install_status_command_roundtrip(self):
         data = self.install('--default', 'on')
         self.assertEqual(data['state']['global_policy'], 'ON')
