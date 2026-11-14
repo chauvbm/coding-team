@@ -165,7 +165,12 @@ def _prepare(path):
     reject_links(state_dir, state_dir)
     gitignore = state_dir / '.gitignore'
     if not gitignore.exists():
-        atomic_write(gitignore, b'*\n')
+        try:
+            atomic_write(gitignore, b'*\n')
+        except OSError:
+            # Concurrent first writers can collide on os.replace (Windows PermissionError).
+            if not gitignore.exists():
+                raise
 
 
 def _clean_session(session_id):
