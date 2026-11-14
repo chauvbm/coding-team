@@ -2,7 +2,7 @@
   "schema_version": 1,
   "date": "2026-11-14",
   "source_commit": "3276a68e3f1fd2cbedd91dc2c9745f3bafe87ff7",
-  "merge_approved_by_user": false,
+  "merge_approved_by_user": true,
   "platforms": {
     "claude-code": {
       "record": "claude-code.json",
@@ -21,5 +21,6 @@
       "all_checks_pass": false,
       "note": "not run"
     }
-  }
+  },
+  "merge_note": "User accepted merging with all platforms unverified (claude-code routing_eval 11/12, runtime checks NOT_RUN; codex and antigravity not run)."
 }
