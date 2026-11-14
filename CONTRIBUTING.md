@@ -9,7 +9,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 git diff --check
 ```
 
-CI runs the suite on Windows/Linux and Python 3.11/3.13, including historical decision replay and benchmark acceptance. A passing replay proves artifact/checker consistency, not that the current skill produced those decisions again. When available, also run the external skill-creator `scripts/quick_validate.py`.
+CI runs the suite on Windows/Linux and Python 3.11/3.13. A passing suite proves the code and the documents agree; it does not show that an agent on a real runtime follows them. When available, also run the external skill-creator `scripts/quick_validate.py`.
 
 Code is Python 3.11+ standard library only. Text files are UTF-8 without BOM, with LF newlines. Keep the guarantee rules intact: write `ENFORCED` only where a runtime mechanism exists, and never let a role with a shell, browser testing or any MCP tool report `no_file_write` or `no_delegate` as ENFORCED.
 
@@ -20,7 +20,7 @@ Neither runs in CI: they need a real, signed-in Claude Code, Codex or Antigravit
 - **Platform smoke test:** follow [the smoke kit](docs/smoke/platform-smoke.md) with [the result template](docs/smoke/result-template.json). It installs into a throwaway project with `--scope project`, checks dispatch, model override, isolation, no nesting, runtime failures and the blind routing evaluation, and stores results in `evaluations/<YYYY-MM-DD>-platform-smoke/<platform>.json`. Record `NOT_RUN` with a reason instead of guessing. The README's "Verified platforms" table is updated only from a published `release.json` in that directory.
 - **Behavioral evaluation:** for a substantial instruction change, use fresh independent evaluators with realistic requests. Export only inputs and operational resources with `scripts/export_evaluation_inputs.py --cases <fixture>` (it copies `SKILL.md`, `references`, `scripts`, `agents` and `platforms`, never tests, checks or results); keep the oracle and earlier verdicts coordinator-only; score with `tests/check_behavioral_results.py --cases <fixture> <responses...>`. Freeze acceptance checks before dispatch. Preserve failures and protocol corrections rather than changing expectations to obtain a pass. Review rationales and actual artifacts as well as structured scores. Instruction-scoped isolation is not a filesystem sandbox.
 
-Do not rewrite published results. `tests/realistic_cases_v3.json` is a protocol separate from the frozen v2 evaluation; the [v3 evaluation](evaluations/2026-11-01-protocol-v3/README.md) publishes raw responses and scores (14/16 with skill, 13/16 control). No v2 scores are rewritten or counted as v3 results. The [cross-module experiment](benchmarks/cross-module/README.md) preserves a frozen contract, pinned upstream source and five fresh attempts per condition; replaying its snapshots with the scorer is not another live run, and its 28/28 tie and unmatched-compute/timing limitations stay as recorded. These records predate the multi-platform version.
+Do not rewrite recorded results: keep failures and protocol corrections instead of changing expectations to obtain a pass.
 
 Measure context with an actual tokenizer or host telemetry when available. Word/character counts are size indicators, not measured tokens. Report unavailable token/cost data as null; account-wide quota deltas cannot attribute usage to a particular worker.
 
@@ -32,7 +32,7 @@ Distribute a named committed revision rather than zipping the working directory:
 git archive --format=zip --output=../coding-team.zip HEAD
 ```
 
-Use a new output filename if an archive already exists. Git archive includes only committed files, so local graphs, caches, private state and untracked artifacts stay out. `.gitattributes` makes text checkouts LF; historical published SHA256 values refer to UTF-8 text with LF newlines. Do not replace historical evidence merely to make it appear current. This full archive includes benchmark and evaluation artifacts for expert review; it is not the smaller runtime package below.
+Use a new output filename if an archive already exists. Git archive includes only committed files, so local graphs, caches, private state and untracked artifacts stay out. `.gitattributes` makes text checkouts LF.
 
 Project-specific tools such as graph indexers are optional development aids, not skill prerequisites. Keep their generated files out of release archives and runtime instructions.
 

@@ -4,7 +4,7 @@ Repository: [chauvbm/coding-team](https://github.com/chauvbm/coding-team).
 
 A skill for proportionate delegation, coordinated implementation and independent verification on three coding-agent platforms: **Claude Code**, **Codex** and **Antigravity**. The Leader (the main chat agent) picks the smallest useful workflow, dispatches role-scoped native subagents (`ct-architect`, `ct-researcher`, `ct-developer`, `ct-test-engineer`, `ct-reviewer` / `ct-reviewer-verify`, `ct-security`) and owns integration and the final result. Small tasks stay with the Leader; substantial work gets bounded workers within the host's actual capacity and the [governance defaults](references/governance-defaults.json). When Superpowers is installed, coding-team routes each task phase to exactly one orchestrator.
 
-This README is a guide for users, maintainers and reviewers. [SKILL.md](SKILL.md) is the operational entrypoint and its linked references define the workflow; the README adds no authority, approvals or competing rules. Licensed under [MIT](LICENSE). Vendored upstream modules in the optional external-source benchmark keep their own licenses; see [that benchmark's provenance](benchmarks/external-sources/README.md).
+This README is a guide for users, maintainers and reviewers. [SKILL.md](SKILL.md) is the operational entrypoint and its linked references define the workflow; the README adds no authority, approvals or competing rules. Licensed under [MIT](LICENSE).
 
 ## Install
 
@@ -202,7 +202,7 @@ The suite covers the CLI, installer transactions and recovery, policy state, rul
 
 ## Independent behavioral evaluation
 
-Decision fixtures in `tests/` store `instructions`, scenario `input` and expected `checks`: [behavioral_cases.json](tests/behavioral_cases.json), [sequential_cases.json](tests/sequential_cases.json), [reviewer_transfer_cases.json](tests/reviewer_transfer_cases.json), [mode_cases.json](tests/mode_cases.json), [realistic_cases_v2.json](tests/realistic_cases_v2.json), [realistic_cases_v3.json](tests/realistic_cases_v3.json) and the orchestrator-routing fixture [orchestration_cases.json](tests/orchestration_cases.json). They are decision simulations: they do not implement the fictional tasks or dispatch workers.
+The decision fixture is [orchestration_cases.json](tests/orchestration_cases.json): `instructions`, scenario `input` and expected `checks` for the orchestrator-routing and gate cases.
 
 A separate coordinator prepares blind inputs with the exporter, which copies `SKILL.md`, `references`, `scripts`, `agents` and `platforms` and one input file per case, omitting tests, expected checks and published results:
 
@@ -217,17 +217,6 @@ python tests/check_behavioral_results.py --cases tests/orchestration_cases.json 
 ```
 
 The checker exits 0 when every case is present and passes, 1 on decision failures. Read the rationales too: structured answers can pass while hiding contradictions. For sequential cases, reveal each input only after the previous response.
-
-## Published evidence (historical)
-
-These records were produced on the earlier Codex-only skill (repository formerly `coding-team-codex`) and are pinned to their source commits. They are not evidence about the multi-platform version or a fresh run on the current checkout.
-
-- [Decision evaluation](evaluations/2026-10-31-decisions/README.md): 34 historical decision responses with protocol corrections.
-- [Lean-workflow evaluation](evaluations/2026-10-31-lean-workflow/README.md): eight mode/level scenarios, unedited 11/14 initial result and a targeted retest.
-- [Policy rerun](evaluations/2026-11-01-policy/README.md): 42 existing cases (raw 40/42) and 12 less leading scenarios with a no-skill control (11/12 versus 10/12; no benefit inferred).
-- [Native recovery exercise](evaluations/2026-11-01-native-recovery/README.md): reviewer/WIP interruptions, preserved dissent and post-QA invalidation.
-- [Protocol v3 evaluation](evaluations/2026-11-01-protocol-v3/README.md): 14/16 with skill, 13/16 without; a single-run difference that does not establish a benefit.
-- [Coding pilot](benchmarks/coding-pilot/README.md), [repository-maintenance pilot](benchmarks/repository-maintenance/README.md), [external-source pilot](benchmarks/external-sources/README.md) and [cross-module benchmark](benchmarks/cross-module/README.md): all conditions tied on the available checks; timing is observational and token/cost telemetry is unavailable. None demonstrates a team advantage or cost saving.
 
 ## Brief for a specialist reviewer
 

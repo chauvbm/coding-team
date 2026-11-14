@@ -57,7 +57,7 @@ def export_inputs(skill_root, cases_path, output=None):
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--cases', type=Path, default=root / 'tests/behavioral_cases.json')
+    parser.add_argument('--cases', type=Path, default=root / 'tests/orchestration_cases.json')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     try:

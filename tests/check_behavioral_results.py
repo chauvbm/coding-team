@@ -69,7 +69,7 @@ def check_results(cases, responses):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("responses", nargs="+", type=Path, help="Independent evaluator JSON arrays")
-    parser.add_argument("--cases", type=Path, default=Path(__file__).with_name("behavioral_cases.json"))
+    parser.add_argument("--cases", type=Path, default=Path(__file__).with_name("orchestration_cases.json"))
     args = parser.parse_args()
     cases = json.loads(args.cases.read_text(encoding="utf-8-sig"))["cases"]
     responses = []
