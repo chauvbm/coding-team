@@ -6,6 +6,8 @@ A skill for proportionate delegation, coordinated implementation and independent
 
 This README is a guide for users, maintainers and reviewers. [SKILL.md](SKILL.md) is the operational entrypoint and its linked references define the workflow; the README adds no authority, approvals or competing rules. Licensed under [MIT](LICENSE).
 
+When a task needs separate Spec and Plan artifacts, use [adaptive planning](references/adaptive-planning.md): the Leader writes both, independent review is scoped to each artifact, and the reviewed Spec is approved before planning implementation. This process does not impose a fixed reviewer roster; runtime behavior remains platform-specific and instructions are ADVISORY.
+
 ## Install
 
 Requires Git and Python 3.11 or newer (standard library only). Installation is done by one CLI, `scripts/coding_team.py`, run from a source checkout. Clone the repository to a **source directory of your choice** (not into the skill directory itself): `install` copies the skill, the rendered role agents and the platform config into the platform's own locations, transactionally, with backups and a SHA-256 manifest.
@@ -174,6 +176,7 @@ This table is filled only from a published smoke record, `evaluations/<date>-pla
 | [SKILL.md](SKILL.md) | Entry point: routing, levels, modes, roles and essential gates |
 | [orchestration.md](references/orchestration.md) | Orchestrator routing, ownership state, handoff and tokens |
 | [workflow.md](references/workflow.md) | Work selection, dependencies, ownership and integration |
+| [adaptive-planning.md](references/adaptive-planning.md) | Scoped Spec and Plan review and approval sequence |
 | [agent-contracts.md](references/agent-contracts.md) | Roles, actual guarantees and handoff contents |
 | [model-routing.md](references/model-routing.md) | Preferred Tier, Requested Model, Effective Model |
 | [debate-governance.md](references/debate-governance.md) | Issues, evidence, counters, termination and approvals |

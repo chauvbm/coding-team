@@ -33,6 +33,7 @@ Send a self-contained request containing:
 - Role/variant ID (for example `ct-reviewer-verify`), bounded objective, acceptance criteria, expected deliverable and evidence.
 - Exact workspace, ownership or inspection scope, allowed actions and stopping conditions.
 - Stage: investigate, plan-review, implement or verify.
+- For adaptive Spec/Plan review, identify which artifact and exact version is under review, the original user requirements, the reviewer's questions and scope, and the Plan's approved Spec dependency where applicable. Reviewers return findings to the Leader; they do not author or approve artifacts for the user.
 - Preferred Tier and Requested Model/effort, plus user pins; say if a force-model variable is active.
 - The actual guarantees for this platform and role, copied from the agent or `doctor`, labeled ENFORCED or ADVISORY.
 - Allowed technique skills, by name (for example test-driven-development, systematic-debugging, verification-before-completion, receiving-code-review), and the forbidden ones: coding-team, subagent-driven-development, dispatching-parallel-agents, executing-plans, requesting-code-review.

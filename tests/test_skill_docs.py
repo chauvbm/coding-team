@@ -95,11 +95,23 @@ class SkillDocsTests(unittest.TestCase):
         for phrase in ('ADVISORY', 'caller-asserted', 'not a running process'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
-        lowered = text.lower()
+        lowered = text[text.index('Apply top to bottom'):].lower()
         positions = [lowered.find(word.lower()) for word in ('L3', 'architect', 'interface', 'independent',
                                                               'plan', 'small')]
         self.assertNotIn(-1, positions)
         self.assertEqual(sorted(positions), positions, 'routing conditions out of order: %s' % positions)
+
+    def test_adaptive_planning_is_linked_and_platform_neutral(self):
+        adaptive = ROOT / 'references' / 'adaptive-planning.md'
+        self.assertTrue(adaptive.is_file())
+        text = read(adaptive)
+        for phrase in ('Leader personally writes and revises both', 'reviewers independently assess',
+                       'user approval', 'OFF', 'SOLO', 'FULL_TEAM', 'do not intercept runtime tool calls'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase.lower(), text.lower())
+        for path in (ROOT / 'SKILL.md', ROOT / 'README.md'):
+            with self.subTest(file=path.name):
+                self.assertIn('adaptive-planning.md', read(path))
 
     def test_readme_states_install_paths_and_guarantee_limits(self):
         """(a) docs: README names the repo, installs all three platforms and states the ADVISORY limits."""

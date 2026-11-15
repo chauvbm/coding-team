@@ -7,6 +7,8 @@ description: "Handle /coding-team controls and coordinate substantial coding, de
 
 Use the smallest amount of coordination that improves the result. Leader owns scope, integration, verification and the final answer. Follow higher-priority instructions, project rules and the user's authorization; this skill adds no permissions.
 
+When the work needs separate Spec and Plan artifacts, or an existing pair is adopted, apply [adaptive planning](references/adaptive-planning.md) before drafting or presenting either artifact. Leader personally writes and revises both, selects independent reviewers for each artifact's actual questions, obtains user approval of the reviewed Spec before drafting the Plan, then obtains approval of the reviewed Plan before implementation. Small, clear work can use direct work or a checklist. The adaptive process does not impose a fixed reviewer roster or automatically select FULL_TEAM. Instructions remain ADVISORY; they do not enforce runtime approvals.
+
 ## Choose the orchestrator
 
 Each phase of a task has one primary orchestrator. Apply top to bottom, first match wins; an explicit user choice wins unless safety policy forbids it. Details, ownership and handoff: [orchestration](references/orchestration.md).
