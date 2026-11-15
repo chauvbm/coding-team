@@ -1,5 +1,7 @@
 # Optional persistent task ledger
 
+For the adaptive Spec + Plan lifecycle, keep the [staged planning record](adaptive-planning.md#record-and-completion-conditions) as well. This helper checks existing Plan/implementation responsibilities after a complete pair exists. It does not check separate Spec readiness or either human approval. A selected Plan roster can use `gated: false` and nonempty `required_reviews`; `gated: true` retains the three-core FULL_TEAM contract. Material issue closure still requires the helper's QA evidence. Do not invent a placeholder Plan to represent a Spec-only stage or interpret this helper's PASS as permission to skip lifecycle conditions.
+
 Use `scripts/task_ledger.py` for long, resumed, parallel or gated tasks when a prose ledger is too easy to lose. Simple tasks may keep concise prose. This helper stores and checks records; it does not dispatch agents, schedule work, inspect source or run tests. Numeric allowances come from [governance-defaults.json](governance-defaults.json), never a second set of constants.
 
 Keep real task ledgers outside the public working tree, or under a deliberately ignored private location. They can contain conversation/evidence references and should not be committed with the skill. `operating_state: PAUSED` preserves a quota or user pause while blocking gate and delivery readiness until an authorized resume is recorded.

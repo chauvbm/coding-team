@@ -9,6 +9,7 @@ Send a self-contained request containing:
 - Role, bounded objective, relevant acceptance criteria and expected deliverable/evidence.
 - Exact workspace, ownership or inspection scope, allowed actions and stopping conditions.
 - Stage: investigate, plan-review, implement or verify.
+- For adaptive planning, name Spec-review or Plan-review, artifact authors, the actual version/content identity, assigned questions and selected review scope. Include original user requirements and decisions or retrievable references. Plan review also receives the approved Spec and its approval reference. Return gaps in these inputs to Leader.
 - Actual selected model/effort configuration and user pins; distinguish observed metadata from requested settings.
 - Effective root task eligibility and any explicit human task override.
 - An explicit prohibition on nested delegation and policy changes.
@@ -58,3 +59,5 @@ Address a named unresolved domain question with explicit scope and closure crite
 Return a concise result with worker/role, work-item and canonical issue IDs, inspected snapshot/paths, findings, changed files, actual checks and remaining limitations. Include Spec/Plan pair, reviewed scope and explicit verdict for plan reviews. A reassessment must state which finding changed and what evidence justifies it; silence is not acceptance. Distinguish requested model from observed model only where relevant and supported by metadata.
 
 Keep initial reviewers independent. Leader mediates evidence-based follow-ups. Stop or await a writer before another agent takes ownership of its files.
+
+In [adaptive planning](adaptive-planning.md), Leader writes and revises the Spec and Plan. Subagents provide research, proposals and review. Every selected reviewer must be independent of the artifact's authors. Return explicit acceptance or unresolved findings for the exact version and assigned scope. Record FULL_TEAM Architect design acceptance separately from independent reviews. Leader records the user's conversational approval.

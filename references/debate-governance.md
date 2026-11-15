@@ -56,7 +56,9 @@ At STOP_HOLD, report the blocker and smallest next step. Do not ask for a specul
 
 ## Consensus Gate and scoped approvals
 
-For FULL_TEAM, a selected full-team plan review or a user-required gate, record:
+Adaptive Spec + Plan work uses [two artifact review stages followed by their respective user approvals](adaptive-planning.md). Its selected reviewer roster may contain a single independent reviewer. Every selected current scoped verdict and resolved material finding is required before presenting that artifact for approval. The three-core rule below applies to explicit FULL_TEAM or an already established full-team gate. Entering adaptive planning alone does not activate that rule. Preserve original findings and actual user approvals throughout corrections.
+
+For FULL_TEAM, a selected full-team plan review or a user-required full-team gate, record:
 
 ```text
 SPEC / PLAN / SCOPE: <current pair and affected scope>
@@ -83,4 +85,4 @@ The successor must be independent of the authors of the reviewed work, inspect t
 
 Material changes to behavior, interfaces, persistence, requirements, scope or acceptance tests invalidate affected approvals and dependent conclusions. Obtain explicit affected reassessment of the new pair. An unchanged reviewer may carry acceptance forward only through an explicit applicability confirmation for the new pair/scope; Leader cannot silently copy it. Cosmetic edits can retain approval with a recorded no-impact rationale. A version label alone does not require every worker to repeat the entire review. Keep covered implementation HOLD while affected approval is missing; unaffected authorized work can proceed.
 
-Ordinary AUTO work has no universal unanimity requirement. Leader can resolve nonmaterial disagreements with evidence and preserve dissent accurately; credible unresolved serious defects still block affected delivery. Plan consensus never replaces independent review and meaningful checks of the final stable integrated changes.
+AUTO work outside the adaptive lifecycle has no universal unanimity requirement. Adaptive planning requires acceptance from its selected scoped reviewers. Leader can resolve nonmaterial disagreements with evidence and preserve dissent accurately; credible unresolved serious defects still block affected delivery. Plan consensus never replaces independent review and meaningful checks of the final stable integrated changes.

@@ -134,6 +134,25 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(agents.read_bytes(), installed)
         self.assertFalse(self.state.exists())
 
+    def test_bootstrap_routes_adaptive_planning_before_spec_approval(self):
+        agents = self.root / 'AGENTS.md'
+        skill = self.root / 'custom skill'
+        result = self.cli('install-global-instructions', '--agents', str(agents), '--skill', str(skill))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        instructions = agents.read_text(encoding='utf-8')
+
+        reference = (skill.resolve() / 'references/adaptive-planning.md').as_posix()
+        self.assertIn(f'`{reference}`', instructions)
+        self.assertIn('work directly or use a checklist', instructions)
+        self.assertIn('chooses a spec and plan or adopts an existing pair', instructions)
+        self.assertIn('invoke coding-team immediately, before drafting or presenting', instructions)
+        self.assertIn('The Leader personally drafts and revises both the spec and plan.', instructions)
+        self.assertRegex(
+            instructions,
+            r'(?s)independent review.*explicit user approval of the spec.*review.*'
+            r'explicit user approval of the plan.*coding-team implementation',
+        )
+
     def test_shell_argument_quotes_metacharacters_for_both_shells(self):
         value = 'space apostrophe\' "double" $(echo substituted); & | >'
         with mock.patch.object(policy.os, 'name', 'nt'):

@@ -81,6 +81,10 @@ For a static quality review, inspect both the operating instructions and the tes
 
 ## How the team operates
 
+Leader first assesses whether the task needs direct work, a checklist or separate Spec + Plan artifacts. Small clear edits normally stay direct. When both artifacts are warranted, coding-team participates from the start. Leader writes and revises both documents, with independent reviewers selected for each document's actual questions. Leader presents the final reviewed Spec for approval, then writes, reviews with the team and presents the Plan. Implementation starts after the user approves the Plan. See [adaptive planning](references/adaptive-planning.md) for reviewer selection, changed requirements and version-bound approvals.
+
+This lifecycle can start with one focused independent reviewer. Leader adds expertise for concrete unresolved questions. Explicit FULL_TEAM retains its existing core-role requirements. The staged planning record preserves review and user-approval evidence through handoffs and resumed chats.
+
 The core responsibilities are Architect, Developer and independent QA/Reviewer, coordinated by the Leader. Investigator, Test Engineer and Specialist roles support specific needs; multiple Developers can own independent work items. Roles are responsibilities, not a required number of agents.
 
 The concurrency ceiling is `max_subagents` in [governance defaults](references/governance-defaults.json), excluding Leader and constrained by runtime capacity, active agents and user limits. `FULL_TEAM` covers the core review responsibilities without requiring all slots. Shared files have one writer at a time. Independent QA examines a stable integrated result, rather than relying on individual workers' summaries.
@@ -140,6 +144,7 @@ The fixtures contain:
 | [behavioral_cases.json](tests/behavioral_cases.json) | 24 independent scenarios | Review independence, duplicates, stale approval, vote pressure, capacity, ownership, continuation, missing reviewers and quota pause |
 | [sequential_cases.json](tests/sequential_cases.json) | Four ordered turns of one issue | Evidence cutoff, stopping a stalled diagnostic, rejecting renamed retries and resuming repair on new evidence |
 | [reviewer_transfer_cases.json](tests/reviewer_transfer_cases.json) | Six independent scenarios | Verified successor reassessment, independence, version, deadline and history preservation |
+| [adaptive_planning_cases.json](tests/adaptive_planning_cases.json) | Independent scenarios | Early routing, Leader authorship, reviewer selection, conversational approval and changed requirements |
 
 Each fixture stores `instructions`, scenario `input` and expected `checks`. These are decision simulations; they do not implement the fictional tasks, dispatch their workers or execute their proposed checks. Historical evaluator outputs and provenance are published in [the decision evaluation record](evaluations/2026-10-31-decisions/README.md). They are pinned to earlier commits and are not evidence of a fresh run on the current checkout.
 
@@ -149,6 +154,7 @@ Use a separate coordinator to prepare blind inputs with the tested exporter. It 
 python scripts/export_evaluation_inputs.py --cases tests/behavioral_cases.json
 python scripts/export_evaluation_inputs.py --cases tests/sequential_cases.json
 python scripts/export_evaluation_inputs.py --cases tests/reviewer_transfer_cases.json
+python scripts/export_evaluation_inputs.py --cases tests/adaptive_planning_cases.json
 ```
 
 The printed directory contains `skill/` and `inputs/`. An optional `--output` must name a new directory outside this repository; existing destinations are refused. This is coordinator preparation, not access enforcement. For sequential cases reveal each numbered input only after the previous response.

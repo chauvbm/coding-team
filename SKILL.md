@@ -5,9 +5,13 @@ description: "Handle /coding team controls and coordinate substantial coding, de
 
 # Coding Team
 
-Use the smallest amount of coordination that improves the result. Leader owns scope, integration, verification and the final answer. Follow higher-priority instructions, applicable project rules and the user's authorization; this skill adds no permissions.
+Use the smallest amount of coordination that improves the result. Leader owns scope, integration, verification and the final answer. Leader personally writes and revises any Spec or Plan the task requires. Follow higher-priority instructions, applicable project rules and the user's authorization; this skill adds no permissions.
 
 ## Choose the path first
+
+First assess complexity, importance, uncertainty, dependencies and reversibility. Decide whether direct work, a checklist or separate Spec + Plan artifacts best fit the task. Small clear changes normally stay direct. Risk level, file count and document names alone do not require both artifacts.
+
+When both are needed, or an existing pair is adopted, enter coding-team before drafting or presenting the first artifact and follow [adaptive planning](references/adaptive-planning.md). Each artifact receives independent review by a Leader-selected roster, corrections and affected reassessment before user approval. Approve the Spec before drafting the Plan, and approve the reviewed Plan before implementation. Retain coding-team ownership through delivery. Respect explicit user choices and eligibility. This path adds no fixed role quota and does not automatically select FULL_TEAM.
 
 | Task | Action | Read next |
 | --- | --- | --- |
@@ -21,7 +25,7 @@ Level alone neither requires FULL_TEAM nor grants external authority or a new us
 
 ## Modes
 
-- **AUTO**, default: choose the smallest useful team; ordinary AUTO has no unanimous plan gate.
+- **AUTO**, default: choose the smallest useful team. The Spec + Plan lifecycle requires its selected scoped reviews and both user approvals. Other AUTO work has no universal unanimous plan gate.
 - **SOLO**: do not delegate; verify directly and disclose material missing independence.
 - **PLAN_ONLY**: investigate and plan without implementation; write planning files only when requested.
 - **REVIEW_ONLY**: inspect and check without fixing implementation.
@@ -43,9 +47,13 @@ Give each file one writer; sequence shared changes and reserve independent-revie
 
 ## When a gate or disagreement applies
 
+Apply the three-role gate when FULL_TEAM or all three core roles are explicitly required, or when a full-team review has already been established. For adaptive agreement, apply the scoped reviews selected for the artifact, including any individual role the user requests.
+
 Read [debate governance](references/debate-governance.md) before full-team plan review, material disagreement or repair/recovery loops. It defines canonical issues, scoped approvals, controlled reviewer transfer and bounded evidence/recovery procedures; numeric limits have one source in governance defaults.
 
-FULL_TEAM, a Leader-selected full-team plan review, or a user-required consensus gate requires PASS **before covered implementation**: three distinct representatives providing current Architect design acceptance and independent Developer/QA approvals of the same Spec/Plan pair, testable acceptance, valid scope/authority and no unresolved or contested BLOCKER/MAJOR. Notes may be nonblocking. Pending, missing or stale approval means HOLD, including reversible implementation. Continue permitted investigation, plan repair or unaffected work.
+For adaptive Spec + Plan work, [the staged planning record](references/adaptive-planning.md#record-and-completion-conditions) determines readiness together with other established gates. Select reviewers by concrete questions and preserve their unresolved findings. A completed JSON plan gate alone does not establish the separate Spec review and human approvals.
+
+FULL_TEAM, a Leader-selected full-team plan review, or a user-required three-core consensus gate requires PASS **before covered implementation**: three distinct representatives providing current Architect design acceptance and independent Developer/QA approvals of the same Spec/Plan pair, testable acceptance, valid scope/authority and no unresolved or contested BLOCKER/MAJOR. Notes may be nonblocking. Pending, missing or stale approval means HOLD, including reversible implementation. Continue permitted investigation, plan repair or unaffected work.
 
 Material changes invalidate affected approvals. Preserve original findings and obtain current reassessment; only the controlled-transfer procedure can assign unavailable reviewers' responsibilities. Replacement, votes, Leader rebuttal, silence or a severity downgrade cannot supply approval. Missing agents never waive a required gate.
 

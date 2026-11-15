@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "instructions": "Use the coding-team skill to decide the next action for each scenario. Simulate decisions only: do not actually dispatch workers, edit implementation, run the proposed checks, or claim they ran. Return a JSON array. Each result must contain id, action, gate (PASS/HOLD/NOT_REQUIRED), operating_state (ACTIVE/EVIDENCE_MODE/STOP_HOLD/PASS/PAUSED), can_write_affected (boolean), ask_user (boolean), reset_counters (boolean), repeat_arguments (boolean), and a short rationale. action must be one enum value: independent_review, organize_correction, targeted_reassessment, evidence_action, plan_repair, repair_verify, hold, schedule_work, ownership_handoff, verify_integrated, direct_work, pause, await_review, implement, complete. Describe the concrete next step in rationale, not in the action enum. Also return every field requested by that case. An action describes the immediate next step, not all eventual steps. Apply only the human authority stated in the scenario; unrelated host preferences do not supply fixture authorization.",
+  "cases": [
+    {
+      "id": "small_change",
+      "input": "A user asks to fix one misspelling in a local README. Scope is clear, impact low and reversible. No existing planning gate. Return needs_spec_plan and force_team.",
+      "checks": {
+        "equals": {
+          "needs_spec_plan": false,
+          "force_team": false,
+          "action": "direct_work",
+          "gate": "NOT_REQUIRED"
+        }
+      }
+    },
+    {
+      "id": "early_ownership",
+      "input": "Leader determines a migration with ambiguous compatibility and dependent modules needs both Spec and Plan. Policy ON, no explicit workflow override, no current owner. Neither file exists. Return orchestrator and enter_before_spec.",
+      "checks": {
+        "equals": {
+          "orchestrator": "coding-team",
+          "enter_before_spec": true
+        }
+      }
+    },
+    {
+      "id": "spec_unreviewed",
+      "input": "Leader has a complete first Spec for this lifecycle and wants to ask the user to approve immediately. No independent reviewer has read it. Return present_for_approval and require_independent_review.",
+      "checks": {
+        "equals": {
+          "present_for_approval": false,
+          "require_independent_review": true,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "targeted_reassessment",
+            "plan_repair",
+            "hold",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "one_reviewer",
+      "input": "Adaptive Spec review has one independent QA selected for the actual acceptance ambiguity, all scoped findings resolved, no separate specialist requirement or FULL_TEAM gate. Return summon_fixed_roster and present_for_approval.",
+      "checks": {
+        "equals": {
+          "summon_fixed_roster": false,
+          "present_for_approval": true
+        }
+      }
+    },
+    {
+      "id": "plain_approval",
+      "input": "Leader presents the exact independently reviewed final Spec for approval. User replies “đồng ý”. No open decisions remain. Return spec_user_approved, require_approval_form and can_draft_plan.",
+      "checks": {
+        "equals": {
+          "spec_user_approved": true,
+          "require_approval_form": false,
+          "can_draft_plan": true
+        }
+      }
+    },
+    {
+      "id": "plan_unreviewed",
+      "input": "Spec has current independent review and user approval. Leader finished the Plan and ran a self-check only. Return present_for_approval and require_independent_review.",
+      "checks": {
+        "equals": {
+          "present_for_approval": false,
+          "require_independent_review": true,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "targeted_reassessment",
+            "plan_repair",
+            "hold",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "plan_changes_spec",
+      "input": "Plan reviewer discovers a necessary correction changing acceptance in the approved Spec. Return require_spec_reassessment, require_spec_user_reapproval and can_implement.",
+      "checks": {
+        "equals": {
+          "require_spec_reassessment": true,
+          "require_spec_user_reapproval": true,
+          "can_implement": false,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "targeted_reassessment",
+            "plan_repair",
+            "hold",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "retain_owner",
+      "input": "Both artifacts have current scoped reviews and user approvals in coding-team adaptive planning. Plan template says execute with SDD. User made no orchestrator choice. Return implementation_orchestrator.",
+      "checks": {
+        "equals": {
+          "implementation_orchestrator": "coding-team",
+          "gate": "PASS",
+          "can_write_affected": true
+        }
+      }
+    },
+    {
+      "id": "off",
+      "input": "Leader decides both artifacts needed, but saved effective policy is OFF and user supplied no task override. Return dispatch_automatically and claim_review_passed.",
+      "checks": {
+        "equals": {
+          "dispatch_automatically": false,
+          "claim_review_passed": false
+        }
+      }
+    },
+    {
+      "id": "self_review",
+      "input": "Leader wrote a Spec. Architect helped author it then approves it. No other agent reviewed it. Return independent_review_satisfied.",
+      "checks": {
+        "equals": {
+          "independent_review_satisfied": false,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "targeted_reassessment",
+            "plan_repair",
+            "hold",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "source_requirements",
+      "input": "Spec reviewer received only the author summary and document, without original user requirements or a retrievable reference. Return resolve_input_gap.",
+      "checks": {
+        "equals": {
+          "resolve_input_gap": true,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "targeted_reassessment",
+            "plan_repair",
+            "hold",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "revised_version",
+      "input": "Reviewer accepted Spec s1. Leader then changes API behavior in s2 and wants to present s2 as reviewed. Return require_affected_reassessment and present_as_reviewed.",
+      "checks": {
+        "equals": {
+          "require_affected_reassessment": true,
+          "present_as_reviewed": false,
+          "gate": "HOLD",
+          "can_write_affected": false
+        },
+        "one_of": {
+          "action": [
+            "independent_review",
+            "targeted_reassessment",
+            "plan_repair",
+            "hold",
+            "evidence_action"
+          ]
+        }
+      }
+    },
+    {
+      "id": "new_specialty",
+      "input": "A selected Plan QA discovers unresolved race conditions outside their expertise. Return add_focused_reviewer and summon_all_roles.",
+      "checks": {
+        "equals": {
+          "add_focused_reviewer": true,
+          "summon_all_roles": false
+        }
+      }
+    },
+    {
+      "id": "existing_approval",
+      "input": "Imported Spec and Plan have valid independent reviews and explicit user approval of the exact current content and scope. Leader verifies all evidence applies. Return ask_duplicate_approval.",
+      "checks": {
+        "equals": {
+          "ask_duplicate_approval": false
+        }
+      }
+    },
+    {
+      "id": "author_scoped_approval",
+      "input": "Leader authored the Spec and wants to approve its API scope personally; an independent QA reviews only acceptance scope. No other independent reviewer covers API. Return independent_review_satisfied.",
+      "checks": {
+        "equals": {
+          "independent_review_satisfied": false,
+          "gate": "HOLD",
+          "can_write_affected": false
+        }
+      }
+    },
+    {
+      "id": "adaptive_consensus",
+      "input": "User asks for QA to review the Spec and for the selected reviewers to reach agreement. The selected independent QA covers all material questions and accepts. There is no FULL_TEAM or three-role gate. Return force_three_core_roles and present_for_approval.",
+      "checks": {
+        "equals": {
+          "force_three_core_roles": false,
+          "present_for_approval": true
+        }
+      }
+    },
+    {
+      "id": "leader_writes_both",
+      "input": "Leader has not drafted the Spec for a task that needs both artifacts. A strong Architect offers to write both the Spec and the later Plan, letting Leader just present them. The normal adaptive workflow applies. Return spec_author and plan_author as title-case role names, and delegate_document_drafting as a boolean.",
+      "checks": {
+        "equals": {
+          "spec_author": "Leader",
+          "plan_author": "Leader",
+          "delegate_document_drafting": false
+        }
+      }
+    }
+  ]
+}

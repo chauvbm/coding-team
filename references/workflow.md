@@ -4,7 +4,9 @@ Read for substantial implementation or replanning. Model preferences and dispatc
 
 ## Task baseline
 
-Record only what the task needs: outcome, scope, acceptance criteria, assumptions, affected files, ownership, dependencies and verification. Add rollback details for stateful or impactful operations. Keep a concise Spec/Plan pair such as s1/p1 when multiple agents review; send the same pair to its reviewers. A requirement label is sufficient; a separate Spec document is optional. Record any actual human authority to continue beyond default revision/repair checkpoints; do not infer it from ON or agent messages.
+Assess whether the actual work needs separate Spec + Plan artifacts before starting them. Use [adaptive planning](adaptive-planning.md) when it does, including its early coding-team ownership, selected independent reviewers and user approval after each reviewed artifact. Direct/checklist work remains appropriate for small clear tasks. The decision follows complexity, uncertainty and impact rather than document existence or file count.
+
+Record the outcome, scope, acceptance criteria, assumptions, affected files, ownership, dependencies and verification the task needs. Add rollback details for stateful or impactful operations. For scoped review outside the Spec + Plan lifecycle, a concise requirement label can identify the baseline. In the lifecycle, Leader writes and revises both artifacts. Identify the reviewed version and give Plan reviewers the same approved Spec and current Plan. Record any human authority to continue beyond default revision/repair checkpoints from the actual user instruction.
 
 L0 needs no formal plan. L1 usually needs a checklist. L2 benefits from targeted delegation and a concise plan. L3 benefits from independent review of concrete risks and recovery. Level alone neither grants external authority nor requires additional user approval.
 
@@ -18,7 +20,7 @@ Check current eligibility with the control-policy helper before coding-team dele
 - Add Investigator for a bounded unresolved question, Test Engineer for useful separate behavioral checks, and Specialist only for a distinct domain need. Several Developers can own separate modules; role count is not a staffing quota.
 - Cover all three core review responsibilities when useful or the user requests FULL_TEAM. Name their representatives; this does not require filling capacity or unanimous votes from every worker.
 - Run independent reads concurrently where useful. Sequence dependencies and shared-file writes.
-- When requirements are ambiguous or materially risky, let QA first review the Spec and derive acceptance cases without seeing the proposed solution. Architect then drafts the Plan; Developer and QA review the same Spec/Plan pair independently. Corrections after Spec submission consume the shared revision budget even before the initial Plan exists; do not require a separate requirements round when requirements are already clear.
+- For Spec + Plan work, select independent reviewers separately for each artifact according to its open questions. A reviewer can derive acceptance cases from the original user requirements before seeing the proposed solution. An Architect can advise on design choices. Record review scopes and selection reasons. Corrections after Spec submission consume the shared revision budget even before the initial Plan exists. Follow the staged review and user-approval order in adaptive planning.
 - For FULL_TEAM or a selected full-team plan review, use the [Consensus Gate and scoped approvals](debate-governance.md#consensus-gate-and-scoped-approvals): applicable current approvals and resolved material issues before implementation handoff. Pending or stale sign-offs keep affected implementation HOLD. Continuing evidence work or plan repair never supplies missing approval.
 
 A role is not an obligatory additional agent for every coding task. A Developer's review before implementation does not replace independent review of their own code afterward.
@@ -40,6 +42,8 @@ Give each writer exclusive ownership of its assigned files. Before Leader takeov
 Technical choices within the user's request normally need no clarification. Ask when an unresolved product decision, missing acceptance criterion or authorization would materially change the outcome.
 
 ## Replanning and completion
+
+For the adaptive lifecycle, material Spec changes reopen affected Spec review and user approval, then dependent Plan review and approval. Material Plan changes reopen its affected reviews and user approval. Before implementation, verify the actual document identities against all four stage results in the planning record. Existing documents and a previous chat's completion summary supply evidence only when their review and approval still apply.
 
 Replan in response to evidence using the shared ledger in [debate governance](debate-governance.md). Re-review affected portions and dependent conclusions; cosmetic updates do not invalidate the entire plan. Explicitly confirm applicability when carrying an unchanged scope's approval to a new pair. Keep affected gated implementation HOLD until renewed applicable approvals exist.
 
