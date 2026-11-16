@@ -16,7 +16,7 @@ Always preview first: `install --dry-run` lists every path it would write, back 
 
 - `--default on|off` sets the global ON/OFF default (state is user-level). Without it, existing state is kept; a new state starts ON.
 - A user-scope install writes the rules block by default, so the Leader uses coding-team automatically on Claude Code, Codex and Antigravity; pass `--no-global-rules` to skip it. The block (`--global-rules`, now the default) is a marked block (`<!-- coding-team-policy:start -->` ... `<!-- coding-team-policy:end -->`) into the platform's global rules file so the Leader handles `/coding-team` controls and routing even before selecting the skill. Bytes outside the markers are never changed. The block embeds the Python executable used at install time (`sys.executable`); re-run `install --global-rules` after changing or removing that Python or virtual environment. On Windows it carries both a PowerShell form and a Git Bash / POSIX form of each command.
-- `--scope project --project-dir DIR` installs only the skill and agents into one project, plus a lock file (`install.lock.lock`) under `<config_root>/coding-team/`, and a backup directory only when an existing file is replaced; no state file or rules file is touched. It cannot be combined with `--default` or an explicit `--global-rules` (project scope never writes rules); the ON/OFF state stays user-level. A project-only install therefore has no state file: `/coding-team on|off` (including `--global`) fail until a user-scope install has run.
+- `--scope project --project-dir DIR` installs the skill and agents into one project. It uses the user-level install lock and backups. Codex also registers the project manifest beside the user-level policy file. Project scope cannot be combined with `--default` or an explicit `--global-rules`. Run a user-scope install to initialize the policy file for `/coding-team on|off`, including `--global`.
 
 Every CLI call prints exactly one JSON object; exit 0 = success, 1 = valid but negative, 2 = error or conflict. Start a fresh chat after installing so the platform loads the new skill and agents. The examples use `python`; use your actual interpreter (for example `python3`), and in PowerShell quote paths with spaces and use the call operator (`& 'C:\path\python.exe' 'C:\src\coding-team\scripts\coding_team.py' ...`).
 
@@ -50,6 +50,29 @@ python ~/src/coding-team/scripts/coding_team.py install --platform codex --defau
 ```
 
 On Codex the commands may also be written with the `$coding-team` prefix. The installed `agents/openai.yaml` keeps implicit invocation enabled; leave it that way so the ON/OFF controls stay reachable while coding-team is OFF. Codex role files carry no model (`static_agent_model: omit`): the Leader passes the tier's model at spawn, because a model in the agent TOML would win over it.
+
+#### Antigravity CLI workers on Windows
+
+The Windows integration dispatches bounded read or edit requests to Google's installed `agy` CLI in a separate copy of the selected project files. It uses Antigravity's native sign-in and a per-session permission profile. It preserves the user's settings. Upgrade all known user and project copies sharing the Codex policy file before enabling workers. For a project copy in another checkout, use `install --platform codex --scope project --project-dir DIR`.
+
+The worker switch starts OFF for each Codex chat and worktree. It also requires the regular coding-team policy to be ON for the chat. Run `doctor --platform codex` from the installed copy to inspect local availability and readiness. Doctor and install previews only inspect local state.
+
+The integration build is verified with local fixtures. It reports `CUSTOMIZATIONS_BLOCKED` for the signed Google CLI until that binary's startup sources and effective permission profile have been qualified. [Qualification requirements](references/antigravity-cli.md#qualify-a-signed-cli-build)
+
+Confirm that your Antigravity account permits using `agy` as a worker from Codex before running `check` or delegating work. Google says third-party coding-agent integrations are unsupported on consumer plans. Use the local test fixtures if your account's scope is unclear or excludes this use. [Antigravity FAQ](https://antigravity.google/docs/faq/#can-i-use-antigravity-cli-headless-mode-in-third-party-coding-agents-or-automate-account-switching) · [Terms](https://antigravity.google/terms)
+
+| Send in the Codex chat | Effect |
+| --- | --- |
+| `/coding-team antigravity status` | Show opt-in, readiness and the chat's attempts. |
+| `/coding-team antigravity on` | Enable this chat and worktree to use the worker after qualification. |
+| `/coding-team antigravity check` | Run qualification with synthetic project files and model calls. Wait for `READY` before delegating. |
+| `/coding-team antigravity off` | Disable this chat and worktree and request cancellation of its outstanding attempt. |
+
+User and project copies that share the Codex policy file share one runner slot. A managed upgrade, recovery or uninstall blocks new attempts and waits for an active process tree to stop before changing the bundle. If it cannot confirm the stop, keep the bundle, state, journal and backups, then retry the same operation after reconciliation. Run `install --platform codex --recover` for an interrupted transaction, adding the original `--scope project --project-dir DIR` for project scope. A successful runtime change requires a fresh check.
+
+To roll back, turn the worker OFF, wait for the current attempt to stop or reconcile it, and use managed uninstall and install for each affected copy. The `pre-antigravity-cli-20261115` tag identifies the pre-integration runtime. Keep the policy file and local SQLite and result artifacts if you need their history.
+
+To move an existing install to a different `CODEX_HOME`, uninstall it using its current `CODEX_HOME` before installing with the new location. [Antigravity CLI reference](references/antigravity-cli.md)
 
 ### Antigravity
 

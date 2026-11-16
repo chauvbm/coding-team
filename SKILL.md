@@ -53,6 +53,8 @@ Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `
 
 ## Roles and delegation
 
+If this installation offers an [external worker](references/control-policy.md#external-workers), use it only when the user has opted in for this chat and worktree and the current policy and setup permit dispatch. Leader keeps control and a native representative can collect the result. Read the platform-specific procedure before asking the worker to act.
+
 | Role | Purpose | Ledger role |
 | --- | --- | --- |
 | `ct-architect` | Read-only design, interfaces, file-ownership matrix | Architect |

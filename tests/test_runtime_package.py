@@ -1,7 +1,10 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -59,6 +62,40 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertIn('coding-team/scripts/marker.txt', names)
         self.assertNotIn('platforms/a.json', manifest['files'])
         self.assertEqual(manifest['platform'], 'b')
+
+    def test_release_packages_contain_external_runtime_and_install_without_creating_attempts(self):
+        required = {
+            'scripts/ct_antigravity.py', 'scripts/ct_external.py', 'scripts/ct_external_store.py',
+            'scripts/ct_external_workspace.py', 'scripts/ct_winjob.py', 'references/control-policy.md',
+            'references/antigravity-cli.md',
+        }
+        for platform in (None, 'codex'):
+            with self.subTest(platform=platform):
+                root = self.root.parent / (platform or 'all')
+                root.mkdir()
+                bundle = builder.build_package(SCRIPT.parents[1], root / 'runtime.zip', platform)
+                with zipfile.ZipFile(bundle) as archive:
+                    manifest = json.loads(archive.read('coding-team/runtime-package.json'))
+                    self.assertTrue(required <= manifest['files'].keys(), manifest['files'].keys())
+                    self.assertFalse({'tests', 'docs', 'giai-doan1', 'evaluations', 'graphify-out'}
+                                     & {name.split('/', 1)[0] for name in manifest['files']})
+                    self.assertFalse(any('fake_agy' in name for name in manifest['files']))
+                    archive.extractall(root / 'extracted')
+
+                home = root / 'home'
+                home.mkdir()
+                env = dict(os.environ, USERPROFILE=str(home), HOME=str(home), CODEX_HOME=str(home / '.codex'),
+                           PYTHONIOENCODING='utf-8')
+                cli = root / 'extracted/coding-team/scripts/coding_team.py'
+                result = subprocess.run([sys.executable, str(cli), 'install', '--platform', 'codex'],
+                                        cwd=root, env=env, capture_output=True, text=True, timeout=45)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                install = json.loads(result.stdout)
+                installed_manifest = json.loads(Path(install['manifest']).read_bytes())
+                self.assertEqual(installed_manifest['external_abi'], 1)
+                self.assertTrue(required <= installed_manifest['files']['skill_dir'].keys())
+                self.assertEqual(installed_manifest['state_path'], (home / '.codex/coding-team/state.json').as_posix())
+                self.assertFalse((home / '.codex/coding-team/external').exists())
 
     def test_unknown_platform_rejected_before_output(self):
         for bad in ('c', '../a', ''):

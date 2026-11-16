@@ -55,6 +55,8 @@ When reusing an agent, explicitly change its stage and send the latest plan, own
 
 ## Handoff evidence
 
+An [external worker's native representative](antigravity-cli.md#assign-and-collect) receives one attempt key, its canonical worktree and a short-lived read grant. It calls the installed read-only collect operation, returns the attempt state, result ID, summary and artifact digests, and leaves all state transitions to Leader. Role separation in the native app is ADVISORY. The helper separately enforces grant scope and expiry.
+
 Return a concise result with role/variant, work-item and canonical issue IDs, inspected snapshot and paths, findings, changed files, actual checks and remaining limitations. Include the Spec/Plan pair, reviewed scope and explicit verdict for plan reviews. A reassessment states which finding changed and what evidence justifies it; silence is not acceptance.
 
 Record `Effective Model` only from runtime metadata; otherwise record `unverified`. Never copy the Requested Model into the Effective Model field.

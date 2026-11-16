@@ -304,6 +304,10 @@ def doctor(cfg, *, scope, env, home, project_dir) -> dict:
         problems.append('global rules block ' + report['rules_block'])
     report['problems'] = problems
     report['healthy'] = not problems
+    if cfg['platform'] == 'codex' and os.name == 'nt':
+        from ct_external import doctor_status
+
+        report['antigravity_cli'] = doctor_status(cfg, paths, env, home, project_dir or Path.cwd(), manifest)
     return report
 
 
@@ -341,6 +345,24 @@ def _parser():
         item.add_argument('--platform', choices=PLATFORMS)
         item.add_argument('--chat-id')
         item.add_argument('--state', type=Path)
+
+    item = sub.add_parser('external')
+    item.add_argument('operation', choices=('reserve', 'start', 'status', 'cancel', 'reconcile',
+                                             'grant-read', 'collect', 'candidate', 'mark-tested',
+                                             'apply', 'discard', 'run-attempt'))
+    item.add_argument('--platform', choices=PLATFORMS, required=True)
+    item.add_argument('--workspace', type=Path, required=True)
+    item.add_argument('--task-id')
+    item.add_argument('--attempt', type=int)
+    item.add_argument('--request-stdin', action='store_true')
+    item.add_argument('--read-grant-stdin', action='store_true')
+    item.add_argument('--runner-bootstrap-stdin', action='store_true', help=argparse.SUPPRESS)
+    item.add_argument('--report-stdin', action='store_true')
+    item.add_argument('--wait-seconds', type=int, default=0)
+    item.add_argument('--ttl-seconds', type=int, default=300)
+    item.add_argument('--candidate-sha')
+    item.add_argument('--record-receipt', metavar='RESULT_ID')
+    item.add_argument('--target', choices=('process', 'apply'))
 
     item = sub.add_parser('doctor')
     item.add_argument('--platform', choices=PLATFORMS)
@@ -399,6 +421,11 @@ def _uninstall(args, env, home):
 
 def _policy(args, env, home):
     cfg = _config(resolve_platform(args.platform, env))
+    if args.action == 'command' and re.match(r'^\s*/(?:coding-team|team-coding)\s+antigravity\b',
+                                            args.text, re.IGNORECASE | re.ASCII):
+        from ct_external import control_command
+
+        return control_command(args, SOURCE_ROOT, cfg, env, home)
     state = args.state or target_paths(cfg, 'user', env, home, None)['state_file']
     chat_id = args.chat_id if args.chat_id is not None else chat_id_from_env(cfg, env)
     if args.action == 'status':
@@ -406,6 +433,12 @@ def _policy(args, env, home):
     else:
         result = ct_policy.apply_command(state, args.text, chat_id)
     return dict(result, platform=cfg['platform'], state_path=Path(state).as_posix()), 0
+
+
+def _external(args, env, home):
+    from ct_external import external_command
+
+    return external_command(args, SOURCE_ROOT, _config(args.platform), env, home, sys.stdin.buffer)
 
 
 def _doctor(args, env, home):
@@ -481,10 +514,14 @@ def _orchestrator(args, env, home):
 
 
 HANDLERS = {'install': _install, 'uninstall': _uninstall, 'status': _policy, 'command': _policy,
-            'doctor': _doctor, 'check-config': _check_config, 'orchestrator': _orchestrator}
+            'doctor': _doctor, 'check-config': _check_config, 'orchestrator': _orchestrator,
+            'external': _external}
 
 
 def _error(error, action):
+    if action == 'external':
+        return {'ok': False, 'state': 'NOT_READY', 'reason': getattr(error, 'reason', 'INVALID_EXTERNAL_COMMAND'),
+                'task_id': None, 'attempt_no': None}
     result: dict[str, object] = {'error': str(error), 'error_type': type(error).__name__}
     paths = getattr(error, 'paths', None)
     if paths:

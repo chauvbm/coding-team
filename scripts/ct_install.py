@@ -6,7 +6,7 @@ roll back automatically, a killed process leaves the journal for `recover`.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -23,6 +23,7 @@ from ct_roles import load_roles, render_all
 from ct_storage import LinkedPathError, atomic_write, locked, reject_links
 
 MANIFEST_NAME = 'install-manifest.json'
+_EXTERNAL_REGISTRY_NAME = 'external-installations.json'
 LOCK_TIMEOUT = 30
 ROOT_LABELS = ('skill_dir', 'agents_dir')
 _EXCLUDED_SCRIPTS = {'export_evaluation_inputs.py', 'build_runtime_package.py'}
@@ -162,6 +163,8 @@ def _linked(paths_list, paths):
 def _resolve_paths(cfg, scope, env, home, project_dir):
     paths = dict(target_paths(cfg, scope, env, home, project_dir))
     paths['config_root'] = resolve_config_root(cfg, env, Path(home))
+    if cfg['platform'] == 'codex':
+        paths['external_registry'] = _registry_path(paths['state_file'])
     return paths
 
 
@@ -331,6 +334,66 @@ def _check_identity(manifest, platform, scope, skill_dir):
                          f'({manifest["scope"]} scope) installation; uninstall it first')
 
 
+def _registry_path(state_path):
+    return Path(state_path).parent / _EXTERNAL_REGISTRY_NAME
+
+
+def _external_binding(paths):
+    return {'state_path': Path(paths['state_file']).resolve().as_posix(),
+            'install_lock': Path(paths['lock_file']).resolve().as_posix()}
+
+
+def _check_external_binding(record, paths):
+    if 'external_registry' in paths and record:
+        if any(key in record and record[key] != value for key, value in _external_binding(paths).items()):
+            raise ValueError('installation is bound to a different Codex policy state or install lock; '
+                             'use the existing installation\'s configuration')
+
+
+def _unique_keys(pairs):
+    values = dict(pairs)
+    _require(len(values) == len(pairs), 'duplicate registry key')
+    return values
+
+
+def _parse_external_installations(raw):
+    if raw is None:
+        return {}
+    data = json.loads(raw, object_pairs_hook=_unique_keys)
+    _require(isinstance(data, dict) and set(data) == {'schema_version', 'installations'}
+             and type(data['schema_version']) is int and data['schema_version'] == 1
+             and isinstance(data['installations'], dict), 'invalid external installation registry')
+    entries = {}
+    for manifest, scope in data['installations'].items():
+        path = Path(os.path.abspath(manifest))
+        _require(manifest == path.as_posix() and path.name == MANIFEST_NAME and path not in entries
+                 and scope in ('user', 'project'), 'invalid external installation registry entry')
+        entries[path] = scope
+    return entries
+
+
+def load_external_installations(state_path):
+    """Read known manifests and scopes for this shared state. A legacy registry may be absent."""
+    registry = _registry_path(Path(os.path.abspath(state_path)))
+    reject_links(registry, Path(registry.anchor))
+    return _parse_external_installations(_read(registry))
+
+
+def _registry_target(paths, scope, *, keep):
+    registry = paths['external_registry']
+    old = _read(registry)
+    entries = _parse_external_installations(old)
+    manifest = (Path(paths['skill_dir']) / MANIFEST_NAME).resolve()
+    if keep and entries.get(manifest) != scope:
+        entries[manifest] = scope
+    elif not keep and manifest in entries:
+        del entries[manifest]
+    else:
+        return None
+    content = {'schema_version': 1, 'installations': {_posix(path): value for path, value in entries.items()}}
+    return _Target(registry, _json_bytes(content) if entries else None, old, f'state/{registry.name}')
+
+
 def _journal_guard(paths):
     if Path(paths['journal_file']).exists():
         raise IncompleteTransactionError(
@@ -345,6 +408,7 @@ def _assess(plan):
     manifest = _load_manifest(skill_dir)
     if manifest:
         _check_identity(manifest, plan.platform, plan.scope, skill_dir)
+        _check_external_binding(manifest, paths)
     known = manifest['files'] if manifest else {}
     r = {'targets': [], 'written': [], 'unchanged': [], 'removed_stale': [], 'kept_modified_stale': [],
          'modified_overwritten': [], 'replaced_unmanaged': [], 'state_change': False,
@@ -428,12 +492,19 @@ def _assess(plan):
                'installed_at': manifest['installed_at'] if manifest else None,
                'options': plan.options, 'files': new_files, 'rules_file': rules_file,
                'rules_file_created': created, 'created_dirs': sorted(created_dirs)}
+    registry = paths.get('external_registry')
+    if registry is not None:
+        content.update(external_abi=1, **_external_binding(paths))
     file_change = any(t.action is None for t in r['targets'])
     if file_change or content != manifest:
         content['installed_at'] = _now()
         old = _read(manifest_path)
         r['targets'].append(_Target(manifest_path, _json_bytes(content), old,
                                     f'skill_dir/{MANIFEST_NAME}'))
+    if registry is not None and not linked(registry):
+        target = _registry_target(paths, plan.scope, keep=True)
+        if target is not None:
+            r['targets'].append(target)
     r['created_dirs'] = sorted(created_dirs - (set(manifest['created_dirs']) if manifest else set()))
     return r
 
@@ -482,6 +553,27 @@ def _verify_backups(entries, backup_root):
     return bad
 
 
+def _restore_entry(entry):
+    path = Path(entry['path'])
+    current = _read(path)
+    ours = (current is not None and entry.get('new_sha256') is not None
+            and _sha(current) == entry['new_sha256'])
+    if entry['existed']:
+        data = Path(entry['backup']).read_bytes()
+        if current == data:
+            return None
+        if current is not None and not ours:
+            return 'kept'
+        atomic_write(path, data)
+        return 'restored'
+    if current is not None:
+        if not ours:
+            return 'kept'
+        path.unlink()
+        return 'deleted'
+    return None
+
+
 def _restore(entries, created_dirs, paths, kept_links=None):
     """Undo journaled targets (newest first).
 
@@ -492,27 +584,13 @@ def _restore(entries, created_dirs, paths, kept_links=None):
     Returns (restored, deleted_new, kept_unexpected, failed).
     """
     restored, deleted, kept, failed = [], [], [], []
+    outputs = {'restored': restored, 'deleted': deleted, 'kept': kept}
     for entry in reversed(entries):
-        path = Path(entry['path'])
         try:
-            current = _read(path)
-            ours = (current is not None and entry.get('new_sha256') is not None
-                    and _sha(current) == entry['new_sha256'])
-            if entry['existed']:
-                data = Path(entry['backup']).read_bytes()
-                if current == data:
-                    continue
-                if current is not None and not ours:
-                    kept.append(entry['path'])
-                    continue
-                atomic_write(path, data)
-                restored.append(entry['path'])
-            elif current is not None:
-                if not ours:
-                    kept.append(entry['path'])
-                    continue
-                path.unlink()
-                deleted.append(entry['path'])
+            with _codex_state_lock(paths, entry['path']):
+                result = _restore_entry(entry)
+            if result is not None:
+                outputs[result].append(entry['path'])
         except Exception:  # keep going; the journal stays for a later recover
             failed.append(entry['path'])
     for directory in sorted(created_dirs, key=lambda d: len(Path(d).parts), reverse=True):
@@ -526,8 +604,36 @@ def _discard_staging(staging, backup_root):
     _rmdir_if_empty(backup_root)
 
 
-def _transaction(paths, operation, platform, scope, targets, created_dirs, cleanup=None):
+def _codex_state_lock(paths, target):
+    if 'external_registry' in paths:
+        state = Path(os.path.abspath(paths['state_file']))
+        if Path(os.path.abspath(target)) == state:
+            _check_links([state, _lock_path(state)], paths)
+            return locked(state)
+    return nullcontext()
+
+
+def _stage_codex_state(paths, targets, default):
+    if 'external_registry' not in paths:
+        return targets
+    staged = []
+    for target in targets:
+        if target.action is not None:
+            with _codex_state_lock(paths, target.path):
+                old = _read(target.path)
+                payload = ct_policy.prepare_initialization(target.path, default)
+            if payload is None:
+                continue
+            target = replace(target, data=payload, old=old, action=None)
+        staged.append(target)
+    return staged
+
+
+def _transaction(paths, operation, platform, scope, targets, created_dirs, cleanup=None, *, default=None):
     """Stage, back up, journal and apply targets; roll back on Exception. Returns backup dir."""
+    targets = _stage_codex_state(paths, targets, default)
+    if not targets:
+        return None
     backup_root = Path(paths['backup_root'])
     journal_path = Path(paths['journal_file'])
     stamp = _stamp(backup_root)
@@ -552,26 +658,26 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
         journal = {'schema_version': 1, 'operation': operation, 'platform': platform, 'scope': scope,
                    'started_at': _now(), 'backup_dir': backup_dir and _posix(backup_dir),
                    'staging_dir': _posix(staging), 'created_dirs': created_dirs, 'targets': entries}
+        if 'external_registry' in paths:
+            journal.update(_external_binding(paths))
         atomic_write(journal_path, _json_bytes(journal))
         for target, entry in zip(targets, entries):
-            # Compare-before-write: the backup holds what _assess read. If the target changed
-            # since (another editor, a user), abort before touching it; rollback then undoes
-            # the earlier targets and this one keeps the user's bytes.
-            if _read(target.path) != target.old:
-                raise ModifiedTargetError('target changed while the transaction was running; '
-                                          'it was left as is', [_posix(target.path)])
-            started += 1
-            if target.action is not None:
-                target.action()
-                # The action's bytes are only known now; journal them so a rollback or
-                # recover may undo them (until then they are treated as unexpected and kept).
-                after = _read(target.path)
-                entry['new_sha256'] = None if after is None else _sha(after)
-                atomic_write(journal_path, _json_bytes(journal))
-            elif target.data is not None:
-                atomic_write(target.path, target.data)
-            elif os.path.lexists(target.path):
-                Path(target.path).unlink()
+            with _codex_state_lock(paths, target.path):
+                # Compare with the bytes backed up before touching this target.
+                if _read(target.path) != target.old:
+                    raise ModifiedTargetError('target changed while the transaction was running; '
+                                              'it was left as is', [_posix(target.path)])
+                started += 1
+                if target.action is not None:
+                    target.action()
+                    # Legacy platform actions only expose their written bytes after the write.
+                    after = _read(target.path)
+                    entry['new_sha256'] = None if after is None else _sha(after)
+                    atomic_write(journal_path, _json_bytes(journal))
+                elif target.data is not None:
+                    atomic_write(target.path, target.data)
+                elif os.path.lexists(target.path):
+                    Path(target.path).unlink()
         if cleanup:
             cleanup()
         journal_path.unlink()
@@ -600,11 +706,34 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
     return backup_dir and _posix(backup_dir)
 
 
+def _lock_path(path):
+    return Path(str(path) + '.lock')
+
+
+def _external_maintenance(paths, operation):
+    if 'external_registry' in paths and os.name == 'nt':
+        from ct_external import maintenance_locked
+
+        return maintenance_locked(Path(paths['state_file']).resolve(), operation)
+    return nullcontext()
+
+
+def _maintenance_pending(paths):
+    if 'external_registry' not in paths or os.name != 'nt':
+        return False
+    from ct_external import maintenance_pending
+
+    return maintenance_pending(Path(paths['state_file']).resolve())
+
+
 def _infra_paths(paths, *, rules=False, state=False):
     """Paths a transaction touches besides plan files; rules/state only when written (R7)."""
     items = [paths['lock_file'], paths['journal_file'], paths['backup_root'],
              Path(paths['skill_dir']) / MANIFEST_NAME]
-    if state:
+    registry = paths.get('external_registry')
+    if registry is not None:
+        items += [registry, _lock_path(paths['lock_file']), _lock_path(paths['state_file'])]
+    if state or registry is not None:
         items.append(paths['state_file'])
     if rules and paths['global_rules_file'] is not None:
         items.append(paths['global_rules_file'])
@@ -644,8 +773,12 @@ def apply_plan(plan, *, dry_run, replace_unmanaged=False, overwrite_modified=Fal
                     root = label_roots[target.label.split('/', 1)[0]]
                     _prune(target.path.parent, root, include_root=False)
 
-            backup_dir = _transaction(paths, 'install', plan.platform, plan.scope, r['targets'],
-                                      r['created_dirs'], cleanup)
+            with _external_maintenance(paths, 'install'):
+                backup_dir = _transaction(paths, 'install', plan.platform, plan.scope, r['targets'],
+                                          r['created_dirs'], cleanup, default=plan.state_default)
+        elif _maintenance_pending(paths):
+            with _external_maintenance(paths, 'recover-only'):
+                pass
         state = None
         if plan.scope == 'user':
             state = ct_policy.load_state(paths['state_file'])
@@ -683,10 +816,24 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
     roots, journal_path = paths['managed_roots'], Path(paths['journal_file'])
     _check_links(_infra_paths(paths), paths)
     with locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
+        _check_links(_infra_paths(paths), paths)
+        if 'external_registry' in paths:
+            try:
+                current_manifest = _load_manifest(paths['skill_dir'])
+            except ValueError:
+                # A recovery journal can repair a manifest whose current bytes are unreadable.
+                current_manifest = None
+            _check_external_binding(current_manifest, paths)
         if not journal_path.exists():
+            with _external_maintenance(paths, 'recover-only'):
+                pass
             return {'restored': [], 'deleted_new': [], 'kept_unexpected': [], 'kept_links': [],
                     'journal_removed': False, 'backup_dir': None}
         journal = _load_journal(journal_path)
+        _check_external_binding(journal, paths)
+        if (journal.get('platform'), journal.get('scope')) != (cfg['platform'], scope):
+            raise RecoveryUnsafeError('journal belongs to a different platform or scope; '
+                                      'rerun with the matching --platform/--scope/--project-dir', [journal_path])
         entries = journal['targets']
         outside = [e['path'] for e in entries if not any(_inside(e['path'], r) for r in roots)]
         if outside:
@@ -697,10 +844,12 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
         if bad:
             raise RecoveryUnsafeError('backups are missing or do not match the journal; nothing restored', bad)
         links = []
-        restored, deleted, unexpected, failed = _restore(entries, journal['created_dirs'], paths, links)
-        if failed:
-            raise IncompleteTransactionError(f'recovery incomplete; journal kept; {_RECOVER_HINT} again',
-                                             failed)
+        with _external_maintenance(paths, 'recover'):
+            restored, deleted, unexpected, failed = _restore(entries, journal['created_dirs'], paths, links)
+            if failed:
+                raise IncompleteTransactionError(f'recovery incomplete; journal kept; {_RECOVER_HINT} again',
+                                                 failed)
+        # The journal still blocks admission while maintenance finalizes under the same lock.
         journal_path.unlink()
         staging = journal.get('staging_dir')
         if (isinstance(staging, str) and _inside(staging, paths['backup_root'])
@@ -719,11 +868,13 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
         _check_links(_infra_paths(paths), paths)
     with nullcontext() if dry_run else locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
         if not dry_run:
+            _check_links(_infra_paths(paths), paths)
             _journal_guard(paths)
         manifest = _load_manifest(skill_dir)
         if manifest is None:
             raise ValueError(f'not a coding-team managed installation: {_posix(skill_dir)}')
         _check_identity(manifest, cfg['platform'], scope, skill_dir)
+        _check_external_binding(manifest, paths)
         targets, removed, kept, missing = [], [], [], []
         kept_files = {label: {} for label in ROOT_LABELS}
         for label in ROOT_LABELS:
@@ -756,7 +907,9 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
         if kept:
             reduced = dict(manifest, files=kept_files, rules_file=None, rules_file_created=False)
             reduced = _json_bytes(reduced)
-        targets.append(_Target(manifest_path, reduced, _read(manifest_path), f'skill_dir/{MANIFEST_NAME}'))
+        old = _read(manifest_path)
+        if old != reduced:
+            targets.append(_Target(manifest_path, reduced, old, f'skill_dir/{MANIFEST_NAME}'))
         created_dirs = sorted((d for d in manifest['created_dirs'] if _dir_allowed(d, paths)),
                               key=lambda d: len(Path(d).parts), reverse=True)
         result = {'dry_run': dry_run, 'removed': removed, 'kept_modified': kept, 'missing': missing,
@@ -765,6 +918,11 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
             result['journal_present'] = Path(paths['journal_file']).exists()
             result['kept_links'] = [d for d in created_dirs if not kept and _is_link(d)]
             return result
+
+        if 'external_registry' in paths:
+            target = _registry_target(paths, scope, keep=bool(kept))
+            if target is not None:
+                targets.append(target)
 
         def cleanup():
             for path in removed:
@@ -775,5 +933,10 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
                 for directory in created_dirs:
                     _rmdir_if_empty(directory, result['kept_links'])
 
-        result['backup_dir'] = _transaction(paths, 'uninstall', cfg['platform'], scope, targets, [], cleanup)
+        if targets:
+            with _external_maintenance(paths, 'uninstall'):
+                result['backup_dir'] = _transaction(paths, 'uninstall', cfg['platform'], scope, targets, [], cleanup)
+        elif _maintenance_pending(paths):
+            with _external_maintenance(paths, 'recover-only'):
+                pass
     return result

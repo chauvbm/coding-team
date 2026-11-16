@@ -40,6 +40,10 @@ Confirm the structured result in the user's language and explain when a global O
 
 Controls never reset ledgers, extend budgets, approve plans or resume STOP_HOLD. OFF keeps gates and findings; do not evade gates through direct implementation. Stop further dispatch in this chat, stop or await affected writers before ownership transfer, and preserve partial work. Continuation follows the [checkpoint decision matrix](debate-governance.md#checkpoint-decision-matrix), independent of eligibility.
 
+## External workers
+
+The Windows Codex installation supports a separate, default-OFF [Antigravity CLI opt-in](antigravity-cli.md). Its four commands use the same installed `command` entry. They keep native policy, budgets and reviews separate. When native policy changes during an external attempt, its supervisor observes the change and stops the affected attempt under its recorded policy generation.
+
 ## `scripts/coding_team.py`
 
 Every invocation prints exactly one JSON object (including `-h`/`--help`, as `{"help": ...}`). Exit 0 = success or healthy, 1 = valid but negative (`doctor` found problems, `orchestrator status` cannot claim), 2 = error or conflict. Argument errors never echo the rejected values. An installed copy resolves its platform from its own manifest; otherwise pass `--platform claude-code|codex|antigravity` (ambiguous detection is an error).
