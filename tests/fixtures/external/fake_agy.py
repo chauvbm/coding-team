@@ -5,11 +5,47 @@ import os
 from pathlib import Path
 import sys
 import time
+import uuid
+
+
+def emit(workspace, output_format, response, *, status="SUCCESS", call=None, denied=False):
+    if output_format != "stream-json":
+        if denied and call is not None:
+            print(f"Tool {call[0]} denied: requires approval in headless mode", file=sys.stderr)
+        print(json.dumps({"status": status, "response": response}))
+        return
+    conversation = str(uuid.uuid4())
+    events = [{"event": "init", "conversation_id": conversation, "init": {
+        "cwd": str(workspace), "tools": ["write_to_file", "view_file"], "permission_mode": "request-review",
+    }}]
+    if call is not None:
+        tool, field, target, action = call
+        info = {"name": tool, "parameters": {field: target}}
+        steps = [("ACTIVE", info)]
+        if denied:
+            message = (f'permission check failed for {action} "{target}": Permission denied for '
+                       f'{action}({target}). Matches user-configured deny rule.')
+            if tool == "search_web":
+                message = "tool call denied by pre-tool hook: coding-team worker only runs file tools"
+            steps.append(("ERROR", {**info, "error": {"type": "TOOL_ERROR", "message": message}}))
+        else:
+            steps.append(("DONE", info))
+        for state, tool_info in steps:
+            events.append({"event": "step_update", "step_update": {
+                "conversation_id": conversation, "step_index": 2, "state": state,
+                "step_type": "tool", "tool_name": tool, "tool_info": tool_info,
+            }})
+    events.append({"event": "result", "result": {
+        "conversation_id": conversation, "num_turns": 1, "status": status, "response": response,
+    }})
+    for event in events:
+        print(json.dumps(event))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-format", default="json")
+    parser.add_argument("--mcp-inventory", action="store_true")
     parser.add_argument("--workspace", default="")
     args, _ = parser.parse_known_args(argv)
 
@@ -38,18 +74,31 @@ def main(argv=None):
             time.sleep(0.02)
 
     mode = os.environ.get("FAKE_AGY_MODE", "success")
+    if args.mcp_inventory:
+        print("No MCP servers configured.")
+        return 0
+    workspace = Path(args.workspace or Path.cwd())
     probe = ""
-    parts = Path.cwd().parts
-    if "check" in parts:
-        index = parts.index("check")
-        if index + 1 < len(parts):
-            probe = parts[index + 1]
-    denied_tools = {
-        "deny_read_write": "write", "deny_outside_read": "read",
-        "deny_outside_write": "write", "deny_shell": "shell",
-        "deny_mcp": "mcp", "deny_web": "web",
-        "deny_native_read": "read", "deny_private_read": "read",
-    }
+    if len(workspace.parents) >= 2 and workspace.parents[1].name == "check":
+        probe = workspace.parent.name
+    call = None
+    if probe:
+        check = workspace.parents[1]
+        outside = str(check / "outside.txt")
+        private_canary = check.parent / "private-canary.txt"
+        native_canary = next((check / "previous-home" / ".gemini" / "antigravity-cli" / "brain").glob("*.txt"))
+        calls = {
+            "read": ("read_file", "Path", "input.txt", "read_file"),
+            "edit": ("write_file", "Path", "output.txt", "write_file"),
+            "deny_read_write": ("write_file", "Path", "blocked.txt", "write_file"),
+            "deny_outside_read": ("read_file", "Path", outside, "read_file"),
+            "deny_outside_write": ("write_file", "Path", outside, "write_file"),
+            "deny_shell": ("run_command", "CommandLine", "echo CODING_TEAM_CANARY", "unsandboxed"),
+            "deny_web": ("search_web", "query", "https://example.invalid/", "search_web"),
+            "deny_native_read": ("read_file", "Path", str(native_canary), "read_file"),
+            "deny_private_read": ("read_file", "Path", str(private_canary), "read_file"),
+        }
+        call = calls.get(probe)
     fixture_config = {}
     try:
         fixture_config = json.loads(Path(__file__).with_suffix(".json").read_text(encoding="utf-8"))
@@ -60,9 +109,9 @@ def main(argv=None):
     if probe == diagnostic_probe:
         response = "fake canary output"
         if diagnostic_kind == "contradictory_private_read":
-            private_canary = Path.cwd().parents[2] / "private-canary.txt"
             response = private_canary.read_text(encoding="utf-8").strip()
-            diagnostic = "Tool read_file denied: requires approval in headless mode"
+            emit(workspace, args.output_format, response, call=call, denied=True)
+            return 0
         elif diagnostic_kind == "auth":
             diagnostic = "Authentication required"
         elif diagnostic_kind == "quota":
@@ -70,25 +119,20 @@ def main(argv=None):
         else:
             diagnostic = "fixture diagnostic"
         print(diagnostic, file=sys.stderr)
-        print(json.dumps({"status": "SUCCESS", "response": response}))
+        emit(workspace, args.output_format, response)
         return 0
-    if mode == "deny" or probe in denied_tools:
-        tool = denied_tools.get(probe, "shell" if mode == "deny" else "tool")
-        tool_names = {"write": "write_file", "read": "read_file", "shell": "run_command",
-                      "mcp": "mcp_tool", "web": "read_url"}
-        print("Tool " + tool_names.get(tool, tool) + " denied: requires approval in headless mode",
-              file=sys.stderr)
-        print(json.dumps({"status": "SUCCESS", "response": "fake canary output"}))
+    if mode == "deny" or probe.startswith("deny_"):
+        call = call or ("run_command", "CommandLine", "echo FIXTURE", "unsandboxed")
+        emit(workspace, args.output_format, "fake canary output", call=call, denied=True)
         return 0
     if mode == "error":
-        print(json.dumps({"status": "ERROR", "response": "fake failure"}))
+        emit(workspace, args.output_format, "fake failure", status="ERROR")
         return 1
 
-    workspace = Path(args.workspace or Path.cwd())
     input_file = workspace / "input.txt"
     content = input_file.read_bytes() if input_file.is_file() else b""
     response = content.decode("utf-8").rstrip("\r\n") if content else "fake canary output"
-    declared = set(request.get("edit_paths", ()))
+    declared = set(json.loads(os.environ.get("FAKE_AGY_EDIT_PATHS", "[]")))
     fill = request.get("write_byte", "x")
     sizes = request.get("write_sizes", {})
     if not isinstance(sizes, dict) or not isinstance(fill, str) or len(fill) != 1:
@@ -107,10 +151,10 @@ def main(argv=None):
         target = workspace / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(fill.encode("utf-8") * size)
-    if "edit" in parts and not request.get("write_files"):
+    if probe == "edit" and "output.txt" in declared:
         (workspace / "output.txt").write_bytes(content)
     response = request.get("response", response)
-    print(json.dumps({"status": "SUCCESS", "response": response}))
+    emit(workspace, args.output_format, response, call=call)
     return 0
 
 

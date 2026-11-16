@@ -94,14 +94,18 @@ def inspect_binary_metadata(env):
     return BinaryMetadata(path.resolve(), hashlib.sha256(path.read_bytes()).hexdigest(), "fake-agy/1", "OK",
                           "fixture", (path.stat().st_size, path.stat().st_mtime_ns))
 
-def build_launch(preflight, role, prompt, workspace, private_root, timeout_s):
+def build_launch(preflight, role, prompt, workspace, private_root, timeout_s, *, edit_paths=(), mcp_inventory=False):
+    if (not production_decoder._outside_projection(private_root, workspace)
+            or not production_decoder._dir_exists(private_root)):
+        raise CliPreflightError("CUSTOMIZATIONS_BLOCKED")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("CODEX_", "ANTIGRAVITY_"))
            and k not in {"GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}}
     env["FAKE_AGY_MODE"] = os.environ.get("FAKE_AGY_MODE", "success")
+    env["FAKE_AGY_EDIT_PATHS"] = json.dumps(edit_paths)
     for name in ("FAKE_AGY_MARKER", "FAKE_AGY_BARRIER", "FAKE_AGY_BARRIER_TIMEOUT"):
         if name in os.environ: env[name] = os.environ[name]
-    args = (str(FAKE_AGY), "--output-format", "json")
+    args = (str(FAKE_AGY), "--mcp-inventory") if mcp_inventory else (str(FAKE_AGY), "--output-format", "stream-json")
     return LaunchSpec(Path(sys.executable), args, Path(workspace), env, prompt.encode("utf-8"))
 
 def revalidate_launch(preflight, launch):
@@ -119,8 +123,9 @@ def validate_prompt(prompt):
         raise CliPreflightError("INVALID_REQUEST")
     return prompt.encode("utf-8")
 
-def decode_result(exit_code, stdout, stderr, overflow=False):
-    return production_decoder.decode_result(exit_code, stdout, stderr, overflow)
+decode_stream_result = production_decoder.decode_stream_result
+decode_check_result = production_decoder.decode_check_result
+decode_mcp_inventory = production_decoder.decode_mcp_inventory
 ''' % fake
 
 

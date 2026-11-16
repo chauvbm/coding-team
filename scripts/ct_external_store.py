@@ -1024,12 +1024,19 @@ class Store:
         state = row['state'] if row['state'] in ('STOPPING', 'RECONCILE_REQUIRED') else 'FINALIZING'
         return self._update(connection, row, state=state, stop_proof=encoded, stopped_at=self._clock())
 
+    @staticmethod
+    def _check_probe_proven(evidence):
+        if evidence.get('tool_absence'):
+            return evidence['probe'] == 'deny_mcp' and evidence['runtime_denial'] is False
+        return evidence['runtime_denial'] == evidence['probe'].startswith('deny_')
+
     def record_check_step(self, key, runner_claim, stamp, step, proof, evidence):
         evidence = _mapping(evidence, 'INVALID_CHECK_STEP')
         _identifier(evidence.get('probe'), 'INVALID_CHECK_STEP')
         if (type(evidence.get('passed')) is not bool
-                or not set(evidence) <= {'probe', 'passed', 'reason', 'runtime_denial', 'exit_code'}
+                or not set(evidence) <= {'probe', 'passed', 'reason', 'runtime_denial', 'exit_code', 'tool_absence'}
                 or type(evidence.get('runtime_denial')) is not bool
+                or type(evidence.get('tool_absence', False)) is not bool
                 or evidence.get('exit_code') is not None and type(evidence['exit_code']) is not int):
             raise StoreError('INVALID_CHECK_STEP')
         _reason(evidence.get('reason'))
@@ -1042,7 +1049,7 @@ class Store:
                 if (row['kind'] != 'CHECK' or type(step) is not int or step != len(progress) + 1
                         or step > len(CHECK_PROBES) or CHECK_PROBES[step - 1] != evidence['probe']
                         or stopped['basis'] != 'JOB_EMPTY' or not row['resume_possible']
-                        or (evidence['passed'] and evidence['runtime_denial'] != evidence['probe'].startswith('deny_'))
+                        or (evidence['passed'] and not self._check_probe_proven(evidence))
                         or any(entry['stop_proof'] == stopped for entry in progress)):
                     raise StoreError('INVALID_CHECK_STEP')
                 row = self._record_stopped(connection, row, proof)
@@ -1116,8 +1123,7 @@ class Store:
             evidence = [entry['evidence'] for entry in progress]
             if (tuple(probe['probe'] for probe in evidence) != CHECK_PROBES or evidence != list(probe_results)
                     or progress[-1]['stop_proof'] != _decoded(row['stop_proof'])
-                    or not all(probe['passed'] and probe['runtime_denial'] == name.startswith('deny_')
-                               for name, probe in zip(CHECK_PROBES, evidence))):
+                    or not all(probe['passed'] and self._check_probe_proven(probe) for probe in evidence)):
                 return self._publish(connection, row, {'state': 'FAILED', 'reason': 'CHECK_PROOF_REQUIRED'})
             result = {'state': 'COMPLETED', 'probe_results': evidence}
             if qualification is not None:
