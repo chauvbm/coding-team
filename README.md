@@ -57,9 +57,7 @@ The Windows integration dispatches bounded read or edit requests to Google's ins
 
 The worker switch starts OFF for each Codex chat and worktree. It also requires the regular coding-team policy to be ON for the chat. Run `doctor --platform codex` from the installed copy to inspect local availability and readiness. Doctor and install previews only inspect local state.
 
-The integration build is verified with local fixtures. It reports `CUSTOMIZATIONS_BLOCKED` for the signed Google CLI until that binary's startup sources and effective permission profile have been qualified. [Qualification requirements](references/antigravity-cli.md#qualify-a-signed-cli-build)
-
-Confirm that your Antigravity account permits using `agy` as a worker from Codex before running `check` or delegating work. Google says third-party coding-agent integrations are unsupported on consumer plans. Use the local test fixtures if your account's scope is unclear or excludes this use. [Antigravity FAQ](https://antigravity.google/docs/faq/#can-i-use-antigravity-cli-headless-mode-in-third-party-coding-agents-or-automate-account-switching) · [Terms](https://antigravity.google/terms)
+The release includes the signed `agy` 1.5.9 bootstrap profile verified on Windows. The worker reuses the CLI's saved sign-in. Run `check` after enabling the worker to verify the local installation. A verified binary without a matching launch profile reports `CUSTOMIZATIONS_BLOCKED`. [Qualification requirements](references/antigravity-cli.md#qualify-a-signed-cli-build)
 
 | Send in the Codex chat | Effect |
 | --- | --- |

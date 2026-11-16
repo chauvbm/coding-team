@@ -44,7 +44,7 @@ def render_rules_block(*, platform: str, python: str, cli: Path, state: Path, sk
             'of the form `/coding-team antigravity on|off|status|check` or its `/team-coding antigravity` alias. '
             'The external opt-in belongs to the current chat and Git worktree. '
             'Check both policies and the setup before dispatch. '
-            f'See `{external_ref}` for the account condition, setup and native representative.\n\n'
+            f'See `{external_ref}` for setup and the native representative.\n\n'
         )
     return f'''{START}
 ## Coding-team policy and routing

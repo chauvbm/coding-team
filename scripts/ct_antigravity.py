@@ -79,7 +79,13 @@ _OBSERVED_VERSIONS = (
 # Add a record only after review of exhaustive startup sources on the target
 # runtime, --settings precedence, and the version-specific headless flags.
 # CHECK separately proves runtime stdin, output, and each permission canary.
-_REVIEWED_BOOTSTRAPS: tuple[tuple[str, str, str], ...] = ()
+_REVIEWED_BOOTSTRAPS: tuple[tuple[str, str, str], ...] = (
+    (
+        "8803c289cac04d6e53f2211592d9981c2d5760bc0d9b4a7f222ef6ecc7abb38a",
+        "1.5.9",
+        "e899e3f35c5842770ea5a285bad04493dcebfcc7595e62028885d2803f063f57",
+    ),
+)
 
 _ROLES = ("READ", "EDIT")
 _COMMON_DENY = ("command(*)", "unsandboxed(*)", "mcp(*)", "read_url(*)", "execute_url(*)")

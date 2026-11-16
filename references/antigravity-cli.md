@@ -6,8 +6,6 @@ Phase 1 delegates individual requests from Codex Desktop to the official Windows
 
 Use a managed coding-team installation and the canonical local Git worktree from the Codex session. Install or upgrade the known user and project copies that share the native policy file. The user manages the Google CLI and signs in using Antigravity. Coding-team checks the official signed binary, its version and its launch profile locally.
 
-The operator confirms that the native Antigravity account covers using `agy` as a worker from Codex before running a model-backed CHECK or dispatch. Google documents third-party headless use as unsupported under consumer plans. Local fixture tests use a replacement adapter inside an isolated test package. [Antigravity FAQ](https://antigravity.google/docs/faq/#can-i-use-antigravity-cli-headless-mode-in-third-party-coding-agents-or-automate-account-switching)
-
 Handle the following as direct user messages through the installed `coding_team.py command` entry. `/team-coding antigravity` is an alias. Commands are case-insensitive and scoped to the current Codex chat and Git worktree. Fresh scopes start OFF.
 
 | Command | Effect |
@@ -23,7 +21,7 @@ Handle the following as direct user messages through the installed `coding_team.
 
 ## Qualify a signed CLI build
 
-The bootstrap list starts empty. With a native account that covers this use, verify the signed binary on the target Windows host using synthetic files. Identify the startup sources and prove that the session settings and discovery files remain effective through CLI startup. Record the binary version and digest, settings precedence and source fingerprints. Production admission requires a reviewed bootstrap record and a completed CHECK for the same profile.
+The bootstrap list includes the signed `agy` 1.5.9 launch profile verified on Windows. Qualifying another profile requires evidence from synthetic files on the target Windows host. Record the binary version and digest, effective session settings, startup sources, and their fingerprints. Admission requires a reviewed bootstrap record and a completed CHECK for the same profile.
 
 The supervisor generates a separate CLI home and starts one reviewed pre-tool hook from that home. The hook passes file tools to Antigravity's scoped permissions and blocks other tools before execution. The hook runs through the Windows system command processor with a restricted search path. Machine-level Antigravity settings, command processor AutoRun and workspace customization redirects block qualification when they could introduce unreviewed behavior. The supervisor checks these sources without modifying user configuration. [Antigravity hooks](https://antigravity.google/docs/hooks/#pretooluse) · [Command processor startup](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd#remarks)
 
