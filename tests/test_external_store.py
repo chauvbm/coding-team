@@ -1,4 +1,5 @@
 import importlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import os
@@ -93,6 +94,201 @@ class StoreTests(unittest.TestCase):
         claim = self.start()
         proof, evidence = self.check_progress(claim)
         return self.store.commit_check(self.key, claim, self.stamp, proof, self.fingerprint, evidence)
+
+    def model_catalog(self, key, model_ids=('gemini-3.1-pro', 'claude-sonnet')):
+        stamp = self.store.discovery_stamp(self.owner, key, self.stamp, self.fingerprint)
+        return self.store.record_catalog(self.owner, key, self.stamp, self.fingerprint, stamp, model_ids)
+
+    def test_model_receipt_is_scoped_and_exact_replay_survives_consumption(self):
+        self.ready()
+        self.enable(self.other)
+        key = self.api.AttemptKey('CT-2', 1)
+        another = self.api.AttemptKey('CT-2', 2)
+        request = self.api.Request('EDIT', 'edit', 'a' * 40, {}, ('one.txt',))
+        catalog = self.model_catalog(key)
+        allowed = self.api.ModelSelection(catalog, 'gemini-3.1-pro')
+        wrong_model = self.api.ModelSelection(catalog, 'Gemini-3.1-pro')
+        wrong_owner = (self.other, key, request, self.stamp, self.fingerprint)
+        wrong_attempt = (self.owner, another, request, self.stamp, self.fingerprint)
+        reserve = (self.owner, key, request, self.stamp, self.fingerprint)
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.reserve, *wrong_owner, selection=allowed)
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.reserve, *wrong_attempt, selection=allowed)
+        self.assert_reason('MODEL_NOT_ELIGIBLE', self.store.reserve, *reserve, selection=wrong_model)
+        self.assertIsNone(self.store.active_attempt())
+        original = self.store.reserve(*reserve, selection=allowed)
+        self.assertEqual(self.store.run_snapshot(key, owner=self.owner).model_selection, allowed)
+        self.store.cancel(self.owner, key)
+        self.now += 61
+        self.assertEqual(self.store.reserve(*reserve, selection=allowed).key, original.key)
+        self.assertEqual(self.store.lookup_reservation(self.owner, key, request, selection=allowed).state, 'CANCELED')
+        self.assert_reason('CONFLICT', self.store.lookup_reservation, self.owner, key, request)
+        self.assert_reason('CONFLICT', self.store.reserve, *reserve, selection=wrong_model)
+        changed_ref = self.api.ModelSelection('e' * 64, allowed.model_id)
+        self.assert_reason('CONFLICT', self.store.reserve, *reserve, selection=changed_ref)
+
+    def test_discovery_revalidates_policy_and_supersedes_a_published_receipt(self):
+        self.ready()
+        key = self.api.AttemptKey('CT-2', 1)
+        old = self.model_catalog(key)
+        first = self.store.discovery_stamp(self.owner, key, self.stamp, self.fingerprint)
+        latest = self.store.discovery_stamp(self.owner, key, self.stamp, self.fingerprint)
+        self.assertNotEqual(first, latest)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.reserve, self.owner, key, request, self.stamp,
+                           self.fingerprint, selection=self.api.ModelSelection(old, 'gemini-3.1-pro'))
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.record_catalog, self.owner, key, self.stamp,
+                           self.fingerprint, first, ['gemini-3.1-pro'])
+        changed = ct_policy.PolicyStamp('ON', 0, 2)
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.record_catalog, self.owner, key, changed,
+                           self.fingerprint, latest, ['gemini-3.1-pro'])
+        self.store.set_opt_in(self.owner, False, self.stamp)
+        self.enable()
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.record_catalog, self.owner, key, self.stamp,
+                           self.fingerprint, latest, ['gemini-3.1-pro'])
+        self.assertIsNone(self.store.active_attempt())
+
+    def test_discovery_verification_is_read_only_after_expired_reservation_cleanup(self):
+        self.enable()
+        key = self.api.AttemptKey('CT-3', 1)
+        self.assert_reason('CHECK_REQUIRED', self.store.discovery_stamp, self.owner, key, self.stamp,
+                           self.fingerprint)
+        self.ready()
+        old = self.api.AttemptKey('CT-2', 1)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        self.reserve(key=old, request=request)
+        self.store.set_projection(old, self.owner, 'b' * 64)
+        self.assert_reason('BUSY', self.store.discovery_stamp, self.owner, key, self.stamp, self.fingerprint)
+        self.now += 60
+        expected = self.store.discovery_stamp(self.owner, key, self.stamp, self.fingerprint)
+        self.assertEqual([view.key for view in self.store.pending_projection_cleanup()], [old])
+        self.assertIsNone(self.store.active_attempt())
+        original = self.store.db_path.read_bytes()
+        self.store.verify_discovery_stamp(self.owner, key, self.stamp, self.fingerprint, expected)
+        self.assertEqual(self.store.db_path.read_bytes(), original)
+        self.now += 60
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.verify_discovery_stamp, self.owner, key,
+                           self.stamp, self.fingerprint, expected)
+        self.assertEqual(self.store.db_path.read_bytes(), original)
+
+    def test_model_receipt_can_expire_before_actual_resume(self):
+        self.ready()
+        key = self.api.AttemptKey('CT-2', 1)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        catalog = self.model_catalog(key)
+        selected = self.api.ModelSelection(catalog, 'gemini-3.1-pro')
+        self.now += 60
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.reserve, self.owner, key, request, self.stamp,
+                           self.fingerprint, selection=selected)
+        self.assertIsNone(self.store.active_attempt())
+
+        catalog = self.model_catalog(key)
+        selected = self.api.ModelSelection(catalog, 'gemini-3.1-pro')
+        self.now += 59
+        self.store.reserve(self.owner, key, request, self.stamp, self.fingerprint, selection=selected)
+        claim = self.start(key)
+        self.store.admit_launch(key, claim, self.stamp, {'job_name': self.identity.job_name})
+        self.store.record_process(key, claim, self.identity)
+        self.now += 1
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.resume_process, key, claim, self.stamp,
+                           lambda: self.fail('expired catalog reached resume'))
+
+    def test_model_catalog_digest_is_validated_and_immutable_through_reservation(self):
+        self.ready()
+        key = self.api.AttemptKey('CT-2', 1)
+        expected = self.store.discovery_stamp(self.owner, key, self.stamp, self.fingerprint)
+        catalog = (self.owner, key, self.stamp, self.fingerprint, expected, ['gemini-3.1-pro'])
+        self.assert_reason('INVALID_MODEL_CATALOG', self.store.record_catalog, *catalog, catalog_digest='bad')
+        receipt = self.store.record_catalog(*catalog, catalog_digest='D' * 64)
+        self.assertEqual(self.store.record_catalog(*catalog, catalog_digest='d' * 64), receipt)
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.record_catalog, *catalog, catalog_digest='e' * 64)
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.record_catalog, *catalog)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        selected = self.api.ModelSelection(receipt, 'gemini-3.1-pro')
+        self.store.reserve(self.owner, key, request, self.stamp, self.fingerprint, selection=selected)
+        reopened = self.api.Store(self.root)
+        snapshot = reopened.run_snapshot(key, owner=self.owner)
+        self.assertEqual((snapshot.model_selection, snapshot.model_catalog_digest), (selected, 'd' * 64))
+
+    def test_verify_prepared_start_checks_lease_and_policy_without_writing(self):
+        self.ready()
+        key = self.api.AttemptKey('CT-2', 1)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        selected = self.api.ModelSelection(self.model_catalog(key), 'gemini-3.1-pro')
+        self.store.reserve(self.owner, key, request, self.stamp, self.fingerprint, selection=selected)
+        self.assert_reason('INVALID_STATE', self.store.verify_prepared_start, key, self.owner, self.stamp)
+        self.store.set_projection(key, self.owner, 'b' * 64)
+        before = self.store.db_path.read_bytes()
+        self.store.verify_prepared_start(key, self.owner, self.stamp)
+        self.assert_reason('POLICY_CHANGED', self.store.verify_prepared_start, key, self.owner,
+                           ct_policy.PolicyStamp('ON', 0, 2))
+        self.now += 60
+        self.assert_reason('CATALOG_REFRESH_REQUIRED', self.store.verify_prepared_start, key, self.owner,
+                           self.stamp)
+        self.assertEqual(self.store.db_path.read_bytes(), before)
+        self.assertEqual(self.store.active_attempt().state, 'RESERVED')
+
+    def test_model_discovery_keeps_legacy_serialized_requests_readable(self):
+        self.ready()
+        legacy = self.api.AttemptKey('legacy', 1)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        self.reserve(key=legacy, request=request)
+        connection = sqlite3.connect(self.store.db_path)
+        try:
+            old = connection.execute('SELECT request, request_digest FROM attempts WHERE task_id=?',
+                                     (legacy.task_id,)).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNone(self.store.run_snapshot(legacy, owner=self.owner).model_selection)
+        self.store.cancel(self.owner, legacy)
+        key = self.api.AttemptKey('CT-2', 1)
+        catalog = self.model_catalog(key)
+        selected = self.api.ModelSelection(catalog, 'gemini-3.1-pro')
+        self.store.reserve(self.owner, key, request, self.stamp, self.fingerprint, selection=selected)
+        connection = sqlite3.connect(self.store.db_path)
+        try:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 1)
+            records = connection.execute('SELECT request, request_digest FROM attempts WHERE kind=?',
+                                         ('READ',)).fetchall()
+            self.assertEqual(records, [old, old])
+            self.assertNotIn('model_selection', json.loads(old[0]))
+        finally:
+            connection.close()
+
+    def test_model_result_uses_bound_requested_id_and_rejects_runtime_substitution(self):
+        self.ready()
+        key = self.api.AttemptKey('CT-2', 1)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        selected = self.api.ModelSelection(self.model_catalog(key), 'gemini-3.1-pro')
+        self.store.reserve(self.owner, key, request, self.stamp, self.fingerprint, selection=selected)
+        claim = self.start(key)
+        self.launch(claim, key)
+        proof = self.proof(claim, key, self.identity)
+        self.store.commit_result(key, claim, self.stamp, proof, {
+            'state': 'COMPLETED', 'reported_model_id': 'claude-sonnet', 'summary': 'unverified result',
+        })
+        collected = self.store.collect_for_owner(self.owner, key)
+        self.assertEqual((collected['state'], collected['reason']), ('FAILED', 'MODEL_MISMATCH'))
+        self.assertEqual(collected['result']['requested_model_id'], 'gemini-3.1-pro')
+        self.assertEqual(collected['result']['reported_model_id'], 'claude-sonnet')
+        self.assertNotIn('summary', collected['result'])
+
+    def test_canceled_model_result_keeps_exact_requested_id_and_discards_late_report(self):
+        self.ready()
+        key = self.api.AttemptKey('CT-2', 1)
+        request = self.api.Request('READ', 'read', 'a' * 40, {}, ())
+        selected = self.api.ModelSelection(self.model_catalog(key), 'gemini-3.1-pro')
+        self.store.reserve(self.owner, key, request, self.stamp, self.fingerprint, selection=selected)
+        claim = self.start(key)
+        self.launch(claim, key)
+        self.store.set_opt_in(self.owner, False, self.stamp)
+        proof = self.proof(claim, key, self.identity)
+        self.store.commit_result(key, claim, self.stamp, proof, {
+            'state': 'COMPLETED', 'requested_model_id': 'claude-sonnet', 'reported_model_id': 'claude-sonnet',
+        })
+        collected = self.store.collect_for_owner(self.owner, key)
+        self.assertEqual(collected['state'], 'CANCELED')
+        self.assertEqual(collected['result']['requested_model_id'], 'gemini-3.1-pro')
+        self.assertIsNone(collected['result']['reported_model_id'])
 
     def test_status_is_read_only_and_missing_database_is_off(self):
         self.assertEqual(self.store.status(self.owner).opt_in, 'OFF')

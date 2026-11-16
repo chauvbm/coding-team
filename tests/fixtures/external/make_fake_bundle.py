@@ -70,10 +70,7 @@ class DecodeResult:
     response: str = ""
     metadata: dict = None
 
-class CliPreflightError(RuntimeError):
-    def __init__(self, reason, message="fixture preflight failed"):
-        super().__init__(message)
-        self.reason = reason
+CliPreflightError = production_decoder.CliPreflightError
 
 def inspect_cli(env, native_config_roots, workspace):
     try:
@@ -94,7 +91,8 @@ def inspect_binary_metadata(env):
     return BinaryMetadata(path.resolve(), hashlib.sha256(path.read_bytes()).hexdigest(), "fake-agy/1", "OK",
                           "fixture", (path.stat().st_size, path.stat().st_mtime_ns))
 
-def build_launch(preflight, role, prompt, workspace, private_root, timeout_s, *, edit_paths=(), mcp_inventory=False):
+def build_launch(preflight, role, prompt, workspace, private_root, timeout_s, *, edit_paths=(),
+                 mcp_inventory=False, model_id=None, inspection=None):
     if (not production_decoder._outside_projection(private_root, workspace)
             or not production_decoder._dir_exists(private_root)):
         raise CliPreflightError("CUSTOMIZATIONS_BLOCKED")
@@ -106,6 +104,10 @@ def build_launch(preflight, role, prompt, workspace, private_root, timeout_s, *,
     for name in ("FAKE_AGY_MARKER", "FAKE_AGY_BARRIER", "FAKE_AGY_BARRIER_TIMEOUT"):
         if name in os.environ: env[name] = os.environ[name]
     args = (str(FAKE_AGY), "--mcp-inventory") if mcp_inventory else (str(FAKE_AGY), "--output-format", "stream-json")
+    if model_id is not None:
+        args += ("--model", model_id)
+    if inspection is not None:
+        args += ("--inspection", inspection)
     return LaunchSpec(Path(sys.executable), args, Path(workspace), env, prompt.encode("utf-8"))
 
 def revalidate_launch(preflight, launch):
@@ -126,6 +128,8 @@ def validate_prompt(prompt):
 decode_stream_result = production_decoder.decode_stream_result
 decode_check_result = production_decoder.decode_check_result
 decode_mcp_inventory = production_decoder.decode_mcp_inventory
+decode_model_catalog = production_decoder.decode_model_catalog
+decode_quota_report = production_decoder.decode_quota_report
 ''' % fake
 
 

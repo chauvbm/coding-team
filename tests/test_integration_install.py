@@ -344,6 +344,12 @@ class InstalledPackageMaintenanceTests(unittest.TestCase):
         self.assertEqual(code, 0, report)
         return report
 
+    def reserve_selected(self, task, request):
+        options = self.attempt('discover', task)
+        self.assertEqual(options['state'], 'MODEL_OPTIONS', options)
+        payload = dict(request, catalog_id=options['catalog_id'], model_id='gemini-fixture-low')
+        return self.attempt('reserve', task, stdin=json.dumps(payload))
+
     def make_ready(self):
         code, report = self.control('check')
         self.assertEqual(code, 0, report)
@@ -366,7 +372,7 @@ class InstalledPackageMaintenanceTests(unittest.TestCase):
         request = {'kind': 'READ', 'prompt': prompt,
                    'base': self.git(self.workspace, 'rev-parse', 'HEAD'),
                    'file_choices': {'input.txt': 'GIT'}, 'edit_paths': []}
-        self.attempt('reserve', task, stdin=json.dumps(request))
+        self.reserve_selected(task, request)
         ack = self.attempt('start', task)
         self.assertTrue(ack['acknowledged'], ack)
         try:
@@ -446,7 +452,7 @@ class InstalledPackageMaintenanceTests(unittest.TestCase):
         request = {'kind': 'READ', 'prompt': 'read the fixture',
                    'base': self.git(self.workspace, 'rev-parse', 'HEAD'),
                    'file_choices': {'input.txt': 'GIT'}, 'edit_paths': []}
-        self.attempt('reserve', key.task_id, stdin=json.dumps(request))
+        self.reserve_selected(key.task_id, request)
         state_path = self.state_dir / 'state.json'
         store = Store(self.state_dir / 'external' / 'v1')
         owner = Owner('codex', self.env['CODEX_THREAD_ID'], str(self.workspace.resolve()), 'antigravity')

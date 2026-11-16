@@ -1,5 +1,6 @@
 """Provider-free stand-in for the Antigravity CLI used by installed-package tests."""
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ import time
 import uuid
 
 
-def emit(workspace, output_format, response, *, status="SUCCESS", call=None, denied=False):
+def emit(workspace, output_format, response, *, status="SUCCESS", call=None, denied=False, model_id=None):
     if output_format != "stream-json":
         if denied and call is not None:
             print(f"Tool {call[0]} denied: requires approval in headless mode", file=sys.stderr)
@@ -18,6 +19,8 @@ def emit(workspace, output_format, response, *, status="SUCCESS", call=None, den
     events = [{"event": "init", "conversation_id": conversation, "init": {
         "cwd": str(workspace), "tools": ["write_to_file", "view_file"], "permission_mode": "request-review",
     }}]
+    if model_id is not None:
+        events[0]["init"]["model"] = model_id
     if call is not None:
         tool, field, target, action = call
         info = {"name": tool, "parameters": {field: target}}
@@ -42,11 +45,58 @@ def emit(workspace, output_format, response, *, status="SUCCESS", call=None, den
         print(json.dumps(event))
 
 
+def inspection_output(inspection, config):
+    switch_marker = config.get("catalog_switch_marker")
+    if inspection == "models":
+        models = config.get("models", [
+            ["gemini-fixture-low", "Fixture Gemini (Low)"],
+            ["gemini-fixture-high", "Fixture Gemini (High)"],
+            ["claude-fixture-thinking", "Fixture Claude (Thinking)"],
+        ])
+        if switch_marker and Path(switch_marker).is_file():
+            time.sleep(config.get("post_usage_delay", 0))
+            models = config.get("models_after_usage", models)
+        for model_id, label in models:
+            print(f"{model_id}\t{label}")
+        return 0
+    if switch_marker:
+        Path(switch_marker).touch()
+    if config.get("quota_auth_required"):
+        print(json.dumps({"status": "ERROR", "error": "Authentication required"}))
+        return 1
+    if config.get("quota_unavailable"):
+        return 1
+    reset_after = config.get("quota_reset_after_seconds", 4 * 60 * 60)
+    reset_at = (datetime.now(timezone.utc) + timedelta(seconds=reset_after)).isoformat().replace("+00:00", "Z")
+    groups = []
+    for name, family, family_id in (
+        ("Gemini Models", "Fixture Gemini", "gemini"),
+        ("Claude and GPT models", "Fixture Claude", "claude"),
+    ):
+        groups.append({
+            "name": name, "description": f"Models within this group: {family}",
+            "buckets": [
+                {"id": f"{family_id}-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
+                 "remaining_fraction": config.get(f"{family_id}_weekly_remaining", 0.9), "reset_time": reset_at},
+                {"id": f"{family_id}-5h", "name": "Five Hour Limit Remaining", "window": "5h",
+                 "remaining_fraction": config.get(f"{family_id}_five_hour_remaining", 0.8), "reset_time": reset_at},
+            ],
+        })
+    print(json.dumps({
+        "status": "SUCCESS", "num_turns": 0,
+        "usage": dict.fromkeys(("input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens"), 0),
+        "command": {"name": "usage", "data": {"groups": groups}},
+    }))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-format", default="json")
     parser.add_argument("--mcp-inventory", action="store_true")
     parser.add_argument("--workspace", default="")
+    parser.add_argument("--model")
+    parser.add_argument("--inspection", choices=("models", "usage"))
     args, _ = parser.parse_known_args(argv)
 
     raw_prompt = sys.stdin.buffer.read()
@@ -104,6 +154,10 @@ def main(argv=None):
         fixture_config = json.loads(Path(__file__).with_suffix(".json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
+    if args.inspection:
+        if raw_prompt:
+            return 2
+        return inspection_output(args.inspection, fixture_config)
     diagnostic_probe = fixture_config.get("diagnostic_probe")
     diagnostic_kind = fixture_config.get("diagnostic_kind")
     if probe == diagnostic_probe:
@@ -154,7 +208,7 @@ def main(argv=None):
     if probe == "edit" and "output.txt" in declared:
         (workspace / "output.txt").write_bytes(content)
     response = request.get("response", response)
-    emit(workspace, args.output_format, response, call=call)
+    emit(workspace, args.output_format, response, call=call, model_id=args.model)
     return 0
 
 

@@ -347,7 +347,7 @@ def _parser():
         item.add_argument('--state', type=Path)
 
     item = sub.add_parser('external')
-    item.add_argument('operation', choices=('reserve', 'start', 'status', 'cancel', 'reconcile',
+    item.add_argument('operation', choices=('discover', 'reserve', 'start', 'status', 'cancel', 'reconcile',
                                              'grant-read', 'collect', 'candidate', 'mark-tested',
                                              'apply', 'discard', 'run-attempt'))
     item.add_argument('--platform', choices=PLATFORMS, required=True)

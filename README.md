@@ -59,6 +59,8 @@ The worker switch starts OFF for each Codex chat and worktree. It also requires 
 
 The release includes the signed `agy` 1.5.9 bootstrap profile verified on Windows. The worker reuses the CLI's saved sign-in. Run `check` after enabling the worker to verify the local installation. A verified binary without a matching launch profile reports `CUSTOMIZATIONS_BLOCKED`. [Qualification requirements](references/antigravity-cli.md#qualify-a-signed-cli-build)
 
+For each assignment, the Codex Leader reads the active Antigravity account's model list and quota. It chooses an exact model and reasoning variant for the task. When the available model groups are out of quota, Codex assigns the work to a native subagent. [Assignment procedure](references/antigravity-cli.md#assign-and-collect)
+
 | Send in the Codex chat | Effect |
 | --- | --- |
 | `/coding-team antigravity status` | Show opt-in, readiness and the chat's attempts. |

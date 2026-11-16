@@ -62,6 +62,13 @@ class InstalledExternalTests(unittest.TestCase):
         args.extend(extra)
         return self.cli_call(*args, input_text=stdin, env=env, timeout=timeout)
 
+    def reserve_selected(self, task, request):
+        code, options = self.external("discover", task)
+        self.assertEqual(code, 0, options)
+        self.assertEqual(options["state"], "MODEL_OPTIONS", options)
+        payload = dict(request, catalog_id=options["catalog_id"], model_id="gemini-fixture-low")
+        return self.external("reserve", task, stdin=json.dumps(payload), extra=("--request-stdin",))
+
     def wait_terminal(self, task_id, attempt=1, *, timeout=20):
         import time
         end = time.monotonic() + timeout
@@ -93,6 +100,104 @@ class InstalledExternalTests(unittest.TestCase):
             fields.extend(("task_id", "attempt_no"))
         for field in fields:
             self.assertIn(field, payload, payload)
+
+    def test_discovery_reads_current_catalog_and_quota_before_any_worker(self):
+        self.make_ready()
+        self.fake_config(gemini_weekly_remaining=0)
+        code, options = self.external("discover", "quota-route")
+        self.assertEqual(code, 0, options)
+        self.assertEqual(options["state"], "MODEL_OPTIONS", options)
+        self.assertEqual(set(options["exhausted_model_ids"]), {"gemini-fixture-low", "gemini-fixture-high"})
+        prior_catalog = options["catalog_id"]
+
+        self.fake_config(gemini_weekly_remaining=0, claude_five_hour_remaining=0)
+        code, options = self.external("discover", "quota-route")
+        self.assertEqual(code, 0, options)
+        self.assertEqual(options["state"], "NATIVE_REQUIRED", options)
+        self.assertEqual(options["reason"], "QUOTA_EXCEEDED", options)
+        self.assertNotIn("catalog_id", options)
+        code, status = self.external("status")
+        self.assertEqual(code, 0, status)
+        self.assertEqual(status["state"], "READY", status)
+        self.assertNotIn("quota-route", {attempt["task_id"] for attempt in status["attempts"]})
+
+        self.fake_config(models=[["different-account-model", "Another Model"]], quota_unavailable=True)
+        code, options = self.external("discover", "quota-route")
+        self.assertEqual(code, 0, options)
+        self.assertEqual(options["state"], "MODEL_OPTIONS", options)
+        self.assertNotEqual(options["quota_status"], "OK", options)
+        self.assertNotEqual(options["catalog_id"], prior_catalog)
+        self.assertEqual([model["id"] for model in options["models"]], ["different-account-model"])
+
+    def test_reserved_attempt_uses_the_selected_model_from_its_catalog(self):
+        self.make_ready()
+        task = "selected-model"
+        request = {"kind": "READ", "prompt": "Read the fixture.", "base": self._git("rev-parse", "HEAD"),
+                   "file_choices": {"input.txt": "GIT"}, "edit_paths": []}
+        code, failure = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        self.assertNotEqual(code, 0, failure)
+        self.assertEqual(failure["reason"], "MODEL_SELECTION_REQUIRED", failure)
+
+        code, options = self.external("discover", task)
+        self.assertEqual(code, 0, options)
+        self.assertEqual(options["state"], "MODEL_OPTIONS", options)
+        request.update(catalog_id=options["catalog_id"], model_id="unknown-model")
+        code, failure = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        self.assertNotEqual(code, 0, failure)
+        self.assertEqual(failure["reason"], "MODEL_NOT_ELIGIBLE", failure)
+
+        request["model_id"] = "gemini-fixture-low"
+        code, reserved = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        self.assertEqual(code, 0, reserved)
+        code, ack = self.external("start", task)
+        self.assertEqual(code, 0, ack)
+        completed = self.wait_terminal(task)
+        self.assertEqual(completed["state"], "COMPLETED", completed)
+        code, collected = self.external("collect", task)
+        self.assertEqual(code, 0, collected)
+        self.assertEqual(collected["result"]["requested_model_id"], "gemini-fixture-low")
+        self.assertEqual(collected["result"]["reported_model_id"], "gemini-fixture-low")
+
+    def test_catalog_changes_cannot_combine_quota_or_launch_the_old_selection(self):
+        self.make_ready()
+        task = "changed-catalog"
+        replacement = [["gemini-fixture-low", "Fixture Gemini (Low)"], ["new-id", "New Model"]]
+        self.fake_config(catalog_switch_marker=str(self.root / "usage-observed"),
+                         models_after_usage=replacement)
+        code, discovery = self.external("discover", task)
+        self.assertNotEqual(code, 0, discovery)
+        self.assertEqual(discovery["reason"], "CATALOG_REFRESH_REQUIRED", discovery)
+        self.assertNotIn("catalog_id", discovery)
+
+        self.fake_config(quota_auth_required=True)
+        code, discovery = self.external("discover", task)
+        self.assertNotEqual(code, 0, discovery)
+        self.assertEqual(discovery["reason"], "AUTH_REQUIRED", discovery)
+        self.assertNotIn("catalog_id", discovery)
+
+        self.fake_config()
+        marker = self.root / "should-not-dispatch"
+        request = {"kind": "READ", "prompt": json.dumps({"spawn_marker": str(marker)}),
+                   "base": self._git("rev-parse", "HEAD"), "file_choices": {"input.txt": "GIT"},
+                   "edit_paths": []}
+        code, reserved = self.reserve_selected(task, request)
+        self.assertEqual(code, 0, reserved)
+        self.fake_config(models=replacement)
+        code, result = self.external("start", task)
+        self.assertNotEqual(code, 0, result)
+        self.assertEqual(result["reason"], "CATALOG_REFRESH_REQUIRED", result)
+        self.assertEqual(self.wait_terminal(task)["state"], "CANCELED")
+        self.assertFalse(marker.exists())
+
+    def test_discovery_does_not_treat_reset_quota_as_exhausted(self):
+        self.make_ready()
+        self.fake_config(gemini_weekly_remaining=0, claude_five_hour_remaining=0,
+                         catalog_switch_marker=str(self.root / "quota-recheck"), quota_reset_after_seconds=2,
+                         post_usage_delay=3)
+        code, options = self.external("discover", "quota-reset")
+        self.assertEqual(code, 0, options)
+        self.assertEqual(options["state"], "MODEL_OPTIONS", options)
+        self.assertEqual(options["quota_status"], "QUOTA_UNAVAILABLE", options)
 
     def test_installed_package_first_use_is_off_and_control_updates_it(self):
         code, status = self.cli_call("command", "/coding-team antigravity status", "--platform", "codex")
@@ -230,7 +335,7 @@ class InstalledExternalTests(unittest.TestCase):
         def reserve(task):
             request = {"kind": "READ", "prompt": "read fixture", "base": self._git("rev-parse", "HEAD"),
                        "file_choices": {"input.txt": "GIT"}, "edit_paths": []}
-            code, view = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+            code, view = self.reserve_selected(task, request)
             self.assertEqual(code, 0, view)
             attempt_root = state_root / "attempts" / ("task-" + task) / "attempt-1"
             workspace_projection = next(attempt_root.glob("workspace-*"))
@@ -265,7 +370,7 @@ class InstalledExternalTests(unittest.TestCase):
                                                               "barrier_timeout": 30}),
                    "base": self._git("rev-parse", "HEAD"), "file_choices": {"input.txt": "GIT"},
                    "edit_paths": []}
-        code, reserved = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(task, request)
         self.assertEqual(code, 0, reserved)
         code, ack = self.external("start", task)
         self.assertEqual(code, 0, ack)
@@ -276,11 +381,7 @@ class InstalledExternalTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertTrue(marker.exists(), "running backend did not reach its barrier")
             self.fake_config(metadata_delay_s=1.0)
-            other_request = {"kind": "READ", "prompt": "other request",
-                             "base": self._git("rev-parse", "HEAD"),
-                             "file_choices": {"input.txt": "GIT"}, "edit_paths": []}
-            code, other = self.external("reserve", "slow-probe", stdin=json.dumps(other_request),
-                                        extra=("--request-stdin",), timeout=15)
+            code, other = self.external("discover", "slow-probe", timeout=15)
             self.assertNotEqual(code, 0, other)
             self.assertIn(other.get("reason"), ("BUSY", "ACTIVE_ATTEMPT", "SLOT_BUSY"), other)
             code, still_active = self.external("status", task)
@@ -298,7 +399,7 @@ class InstalledExternalTests(unittest.TestCase):
         request = {"kind": "EDIT", "prompt": json.dumps({"response": "No edits are needed."}),
                    "base": self._git("rev-parse", "HEAD"), "file_choices": {"input.txt": "GIT"},
                    "edit_paths": ["input.txt"]}
-        code, reserved = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(task, request)
         self.assertEqual(code, 0, reserved)
         code, ack = self.external("start", task)
         self.assertEqual(code, 0, ack)
@@ -317,7 +418,7 @@ class InstalledExternalTests(unittest.TestCase):
         request = {"kind": "READ", "prompt": json.dumps({"spawn_marker": str(marker)}),
                    "base": self._git("rev-parse", "HEAD"), "file_choices": {"input.txt": "GIT"},
                    "edit_paths": []}
-        code, reserved = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(task, request)
         self.assertEqual(code, 0, reserved)
         state_root = Path(self.env["CODEX_HOME"]) / "coding-team" / "external" / "v1"
         db_path = state_root / "state.sqlite3"
@@ -385,7 +486,7 @@ class InstalledExternalTests(unittest.TestCase):
                                                                   "barrier_timeout": 15}),
                         "base": self._git("rev-parse", "HEAD"),
                         "file_choices": {"input.txt": "GIT"}, "edit_paths": []}
-        code, reserved = self.external("reserve", read_task, stdin=json.dumps(read_request), extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(read_task, read_request)
         self.assertEqual(code, 0, reserved)
         code, ack = self.external("start", read_task, timeout=20)
         self.assertEqual(code, 0, ack)
@@ -429,8 +530,7 @@ class InstalledExternalTests(unittest.TestCase):
                                                                    "write_files": {"output.txt": "fixture edit\n"}}),
                         "base": self._git("rev-parse", "HEAD"),
                         "file_choices": {"input.txt": "GIT"}, "edit_paths": edit_paths}
-        code, reserved = self.external("reserve", edit_task, stdin=json.dumps(edit_request),
-                                       extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(edit_task, edit_request)
         self.assertEqual(code, 0, reserved)
         code, ack = self.external("start", edit_task)
         self.assertEqual(code, 0, ack)
@@ -448,7 +548,7 @@ class InstalledExternalTests(unittest.TestCase):
                                                               "barrier_timeout": 20}),
                    "base": self._git("rev-parse", "HEAD"), "file_choices": {"input.txt": "GIT"},
                    "edit_paths": []}
-        code, reserved = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(task, request)
         self.assertEqual(code, 0, reserved)
         code, ack = self.external("start", task)
         self.assertEqual(code, 0, ack)
@@ -485,15 +585,16 @@ class InstalledExternalTests(unittest.TestCase):
         request = {"kind": "READ", "prompt": json.dumps({"spawn_marker": str(marker)}),
                    "base": self._git("rev-parse", "HEAD"),
                    "file_choices": {"input.txt": "GIT"}, "edit_paths": []}
-        code, reserved = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(task, request)
         self.assertEqual(code, 0, reserved)
         fake_binary = self.root / "bundle" / "fake_agy.py"
         fake_binary.write_bytes(fake_binary.read_bytes() + b"\n# changed after CHECK and reserve\n")
-        code, ack = self.external("start", task)
-        self.assertEqual(code, 0, ack)
+        code, blocked = self.external("start", task)
+        self.assertNotEqual(code, 0, blocked)
+        self.assertEqual(blocked["reason"], "PROFILE_CHANGED", blocked)
         result = self.wait_terminal(task)
-        self.assertEqual(result["state"], "FAILED", result)
-        self.assertIn(result["reason"], ("PROFILE_CHANGED", "CHECK_REQUIRED"), result)
+        self.assertEqual(result["state"], "CANCELED", result)
+        self.assertEqual(result["reason"], "PROFILE_CHANGED", result)
         self.assertFalse(marker.exists(), "changed fake binary was spawned")
 
     def test_partial_apply_is_reconciled_before_edit_scope_is_released(self):
@@ -506,7 +607,7 @@ class InstalledExternalTests(unittest.TestCase):
         payload = {"edit_paths": edit_paths, "write_sizes": write_sizes, "write_byte": "z"}
         request = {"kind": "EDIT", "prompt": json.dumps(payload), "base": self._git("rev-parse", "HEAD"),
                    "file_choices": {}, "edit_paths": edit_paths}
-        code, reserved = self.external("reserve", task, stdin=json.dumps(request), extra=("--request-stdin",))
+        code, reserved = self.reserve_selected(task, request)
         self.assertEqual(code, 0, reserved)
         code, ack = self.external("start", task)
         self.assertEqual(code, 0, ack)
@@ -555,8 +656,7 @@ class InstalledExternalTests(unittest.TestCase):
         self.assertEqual(recovered.get("apply_report", {}).get("reason"), "ROLLBACK_VERIFIED", recovered)
         self.assertTrue(all(not (self.workspace / path).exists() for path in edit_paths), recovered)
 
-        code, blocked = self.external("reserve", "after-recovery", stdin=json.dumps(request),
-                                      extra=("--request-stdin",))
+        code, blocked = self.reserve_selected("after-recovery", request)
         self.assertNotEqual(code, 0, blocked)
         self.assertEqual(blocked.get("reason"), "EDIT_SCOPE_BUSY", blocked)
         code, discarded = self.external("discard", task)

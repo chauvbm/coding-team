@@ -32,6 +32,11 @@ _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 _HASH = re.compile(r'[0-9a-fA-F]{64}')
 _BASE = re.compile(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{64}')
 _CODE = re.compile(r'[A-Z][A-Z0-9_]{0,79}')
+MODEL_ID_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
+_MODEL_ID = re.compile(MODEL_ID_PATTERN)
+_CATALOG_ID = re.compile(r'[0-9a-f]{64}')
+_CATALOG_TTL_S = 60
+_MAX_MODELS = 128
 _SCHEMA = (
     """CREATE TABLE meta (
         name TEXT PRIMARY KEY, value INTEGER NOT NULL
@@ -84,6 +89,17 @@ _SCHEMA = (
 )
 _TABLES = frozenset({'meta', 'opt_ins', 'attempts', 'slot', 'checks', 'edit_owners', 'read_grants'})
 _META_DEFAULTS = {'epochs_initialized': 0, 'maintenance': 0, 'runtime_epoch': 0}
+_MODEL_SCHEMA = (
+    """CREATE TABLE model_catalogs (
+        owner TEXT PRIMARY KEY, task_id TEXT NOT NULL, attempt_no INTEGER NOT NULL,
+        catalog_id TEXT NOT NULL UNIQUE, provenance TEXT NOT NULL, expires_at REAL NOT NULL,
+        model_ids TEXT, catalog_digest TEXT
+    )""",
+    """CREATE TABLE attempt_models (
+        attempt INTEGER PRIMARY KEY REFERENCES attempts(id),
+        catalog_id TEXT NOT NULL UNIQUE, model_id TEXT NOT NULL, catalog_digest TEXT
+    )""",
+)
 
 
 @dataclass(frozen=True)
@@ -117,6 +133,12 @@ class Request:
     edit_paths: tuple[str, ...]
     timeout_s: int = 300
     spec_refs: tuple[str, ...] = field(default=(), repr=False)
+
+
+@dataclass(frozen=True)
+class ModelSelection:
+    catalog_id: str
+    model_id: str
 
 
 @dataclass(frozen=True)
@@ -167,6 +189,8 @@ class RunSnapshot:
     stopped_at: float | None
     finished_at: float | None
     received_at: float | None
+    model_selection: ModelSelection | None = None
+    model_catalog_digest: str | None = None
 
 
 class StoreError(ValueError):
@@ -202,6 +226,19 @@ def _digest(value, reason):
     if not isinstance(value, str) or not _HASH.fullmatch(value):
         raise StoreError(reason)
     return value.lower()
+
+
+def _model_id(value):
+    return isinstance(value, str) and _MODEL_ID.fullmatch(value) is not None
+
+
+def _selection(selection, kind):
+    if selection is not None and (
+            kind == 'CHECK' or not isinstance(selection, ModelSelection)
+            or not isinstance(selection.catalog_id, str) or not _CATALOG_ID.fullmatch(selection.catalog_id)
+            or not _model_id(selection.model_id)):
+        raise StoreError('INVALID_MODEL_SELECTION')
+    return selection
 
 
 def _reason(value):
@@ -333,7 +370,7 @@ def _result(value):
     value = _mapping(value, 'INVALID_RESULT')
     fields = {
         'state', 'reason', 'executable_version', 'exit_code', 'summary', 'manifest_id',
-        'artifact_sha', 'binary_sha256', 'profile_fingerprint',
+        'artifact_sha', 'binary_sha256', 'profile_fingerprint', 'requested_model_id', 'reported_model_id',
     }
     result = {key: item for key, item in value.items() if key in fields and item is not None}
     state = result.get('state', 'COMPLETED')
@@ -347,6 +384,9 @@ def _result(value):
     for key in ('manifest_id', 'artifact_sha', 'binary_sha256', 'profile_fingerprint'):
         if key in result:
             result[key] = _digest(result[key], 'INVALID_RESULT')
+    for key in ('requested_model_id', 'reported_model_id'):
+        if key in result and not _model_id(result[key]):
+            raise StoreError('INVALID_RESULT')
     return result
 
 
@@ -581,16 +621,17 @@ class Store:
             return 'OPT_IN_CHANGED'
         return None
 
-    def _ready(self, connection, profile_fingerprint):
+    def _qualification(self, connection, profile_fingerprint):
         if profile_fingerprint is None:
-            return False
-        return connection.execute(
-            """SELECT 1 FROM checks JOIN attempts ON checks.attempt=attempts.id
+            return None
+        row = connection.execute(
+            """SELECT checks.attempt FROM checks JOIN attempts ON checks.attempt=attempts.id
                WHERE checks.profile_fingerprint=? AND attempts.profile_fingerprint=checks.profile_fingerprint
                AND attempts.kind='CHECK' AND attempts.state='COMPLETED' AND attempts.result_id IS NOT NULL
                AND attempts.stop_proof IS NOT NULL AND attempts.runtime_epoch=?""",
             (profile_fingerprint, self._meta(connection, 'runtime_epoch')),
-        ).fetchone() is not None
+        ).fetchone()
+        return row['attempt'] if row is not None else None
 
     def status(self, owner, stamp=None, profile_fingerprint=None, *, include_history=True):
         owner = self._owner(owner, mutating=False)
@@ -617,7 +658,7 @@ class Store:
             elif active is not None:
                 readiness = 'RECONCILE_REQUIRED' if active['state'] == 'RECONCILE_REQUIRED' else 'BUSY'
                 reason = readiness
-            elif self._ready(connection, profile_fingerprint):
+            elif self._qualification(connection, profile_fingerprint) is not None:
                 readiness, reason = 'READY', None
             else:
                 readiness, reason = 'NOT_READY', 'CHECK_REQUIRED'
@@ -673,45 +714,176 @@ class Store:
                             self._stop(connection, active, 'OPT_IN_OFF')
         return self.status(owner, stamp, include_history=False)
 
-    def reserve(self, owner, key, request, stamp, profile_fingerprint):
+    def _new_admission(self, connection, owner_key, stamp, now, *, reap_expired=False):
+        if connection is None:
+            raise StoreError('OPT_IN_OFF')
+        if self._meta(connection, 'maintenance'):
+            raise StoreError('MAINTENANCE')
+        denial = _policy_reason(stamp)
+        if denial is not None:
+            raise StoreError(denial)
+        enabled, epoch = self._opt(connection, owner_key)
+        if not enabled:
+            raise StoreError('OPT_IN_OFF')
+        active = self._active(connection)
+        if active is not None:
+            if reap_expired and active['state'] == 'RESERVED' and active['prepare_deadline'] <= now:
+                self._stop(connection, active, 'PREPARE_LEASE_EXPIRED')
+            else:
+                raise StoreError('RECONCILE_REQUIRED' if active['state'] == 'RECONCILE_REQUIRED' else 'BUSY')
+        return epoch, self._meta(connection, 'runtime_epoch')
+
+    @staticmethod
+    def _assert_next_attempt(connection, task, number, owner_key):
+        previous = connection.execute(
+            'SELECT task_id, attempt_no, owner FROM attempts WHERE task_id=? ORDER BY attempt_no DESC LIMIT 1',
+            (task,),
+        ).fetchone()
+        if previous is not None:
+            if previous['owner'] != owner_key:
+                raise StoreError('OWNER_MISMATCH')
+            if previous['task_id'] != task or previous['attempt_no'] >= number:
+                raise StoreError('CONFLICT')
+
+    @staticmethod
+    def _has_model_tables(connection):
+        count = connection.execute(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('model_catalogs', 'attempt_models')"
+        ).fetchone()[0]
+        if count == 1:
+            raise StoreError('STORE_UNAVAILABLE')
+        return count == 2
+
+    def _bound_model(self, connection, attempt):
+        if not self._has_model_tables(connection):
+            return None, None
+        row = connection.execute('SELECT catalog_id, model_id, catalog_digest FROM attempt_models WHERE attempt=?',
+                                 (attempt,)).fetchone()
+        if row is None:
+            return None, None
+        digest = row['catalog_digest']
+        if digest is not None:
+            digest = _digest(digest, 'STORE_UNAVAILABLE')
+        return ModelSelection(row['catalog_id'], row['model_id']), digest
+
+    def _bound_selection(self, connection, attempt):
+        return self._bound_model(connection, attempt)[0]
+
+    @staticmethod
+    def _catalog_provenance(stamp, profile, epoch, runtime_epoch, qualification):
+        return _json((asdict(stamp), profile, epoch, runtime_epoch, qualification))
+
+    def _current_catalog(self, connection, owner_key, task, number, catalog_id, provenance, now):
+        if not self._has_model_tables(connection):
+            raise StoreError('CATALOG_REFRESH_REQUIRED')
+        row = connection.execute(
+            """SELECT model_ids, expires_at, catalog_digest FROM model_catalogs
+               WHERE owner=? AND task_id=? AND attempt_no=?
+               AND catalog_id=? AND provenance=? AND expires_at>?""",
+            (owner_key, task, number, catalog_id, provenance, now),
+        ).fetchone()
+        if row is None:
+            raise StoreError('CATALOG_REFRESH_REQUIRED')
+        return row
+
+    def discovery_stamp(self, owner, key, stamp, profile_fingerprint):
+        owner_key = _json(asdict(self._owner(owner)))
+        task, number = _key(key)
+        profile = _digest(profile_fingerprint, 'INVALID_PROFILE')
+        with self._db(writable=True) as connection:
+            now = self._clock()
+            epoch, runtime_epoch = self._new_admission(connection, owner_key, stamp, now, reap_expired=True)
+            self._assert_next_attempt(connection, task, number, owner_key)
+            qualification = self._qualification(connection, profile)
+            if qualification is None:
+                raise StoreError('CHECK_REQUIRED')
+            if not self._has_model_tables(connection):
+                for statement in _MODEL_SCHEMA:
+                    connection.execute(statement)
+            catalog_id = secrets.token_hex(32)
+            provenance = self._catalog_provenance(stamp, profile, epoch, runtime_epoch, qualification)
+            connection.execute(
+                """INSERT INTO model_catalogs (owner, task_id, attempt_no, catalog_id, provenance, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(owner) DO UPDATE SET task_id=excluded.task_id, attempt_no=excluded.attempt_no,
+                   catalog_id=excluded.catalog_id, provenance=excluded.provenance,
+                   expires_at=excluded.expires_at, model_ids=NULL, catalog_digest=NULL""",
+                (owner_key, task, number, catalog_id, provenance, now + _CATALOG_TTL_S),
+            )
+            return catalog_id
+
+    def _discovery_offer(self, connection, owner_key, task, number, stamp, profile, expected_stamp):
+        now = self._clock()
+        epoch, runtime_epoch = self._new_admission(connection, owner_key, stamp, now)
+        self._assert_next_attempt(connection, task, number, owner_key)
+        qualification = self._qualification(connection, profile)
+        if qualification is None:
+            raise StoreError('CHECK_REQUIRED')
+        if not isinstance(expected_stamp, str) or not _CATALOG_ID.fullmatch(expected_stamp):
+            raise StoreError('CATALOG_REFRESH_REQUIRED')
+        provenance = self._catalog_provenance(stamp, profile, epoch, runtime_epoch, qualification)
+        return self._current_catalog(connection, owner_key, task, number, expected_stamp, provenance, now)
+
+    def verify_discovery_stamp(self, owner, key, stamp, profile_fingerprint, expected_stamp):
+        owner_key = _json(asdict(self._owner(owner)))
+        task, number = _key(key)
+        profile = _digest(profile_fingerprint, 'INVALID_PROFILE')
+        with self._db() as connection:
+            self._discovery_offer(connection, owner_key, task, number, stamp, profile, expected_stamp)
+
+    def record_catalog(self, owner, key, stamp, profile_fingerprint, expected_stamp, model_ids, *,
+                       catalog_digest=None):
+        if (not isinstance(model_ids, (tuple, list)) or not 1 <= len(model_ids) <= _MAX_MODELS
+                or not all(_model_id(model_id) for model_id in model_ids)
+                or len(set(model_ids)) != len(model_ids)):
+            raise StoreError('INVALID_MODEL_CATALOG')
+        if catalog_digest is not None:
+            catalog_digest = _digest(catalog_digest, 'INVALID_MODEL_CATALOG')
+        encoded_models = _json(sorted(model_ids))
+        owner_key = _json(asdict(self._owner(owner)))
+        task, number = _key(key)
+        profile = _digest(profile_fingerprint, 'INVALID_PROFILE')
+        with self._db(writable=True) as connection:
+            row = self._discovery_offer(connection, owner_key, task, number, stamp, profile, expected_stamp)
+            if row['model_ids'] is not None and (row['model_ids'], row['catalog_digest']) != (
+                    encoded_models, catalog_digest):
+                raise StoreError('CATALOG_REFRESH_REQUIRED')
+            connection.execute('UPDATE model_catalogs SET model_ids=?, catalog_digest=? WHERE owner=?',
+                               (encoded_models, catalog_digest, owner_key))
+            return expected_stamp
+
+    def reserve(self, owner, key, request, stamp, profile_fingerprint, *, selection=None):
         owner = self._owner(owner)
         task, number = _key(key)
         self.attempt_root(key)
         payload = _request(request)
+        selection = _selection(selection, request.kind)
         digest = _hash_text(payload)
         owner_key = _json(asdict(owner))
         with self._db(writable=True) as connection:
             if connection is None:
                 raise StoreError('OPT_IN_OFF')
-            previous = self._previous_reservation(connection, task, number, owner_key, digest)
+            previous = self._previous_reservation(connection, task, number, owner_key, digest, selection)
             if previous is not None:
                 return _public_row(previous)
             profile = _digest(profile_fingerprint, 'INVALID_PROFILE')
-            previous = connection.execute(
-                'SELECT task_id, attempt_no, owner FROM attempts WHERE task_id=? ORDER BY attempt_no DESC LIMIT 1',
-                (task,),
-            ).fetchone()
-            if previous is not None:
-                if previous['owner'] != owner_key:
-                    raise StoreError('OWNER_MISMATCH')
-                if previous['task_id'] != task or previous['attempt_no'] >= number:
-                    raise StoreError('CONFLICT')
-            if self._meta(connection, 'maintenance'):
-                raise StoreError('MAINTENANCE')
-            denial = _policy_reason(stamp)
-            if denial is not None:
-                raise StoreError(denial)
-            enabled, epoch = self._opt(connection, owner_key)
-            if not enabled:
-                raise StoreError('OPT_IN_OFF')
+            self._assert_next_attempt(connection, task, number, owner_key)
             now = self._clock()
-            active = self._active(connection)
-            if active is not None:
-                if active['state'] != 'RESERVED' or active['prepare_deadline'] > now:
-                    raise StoreError('RECONCILE_REQUIRED' if active['state'] == 'RECONCILE_REQUIRED' else 'BUSY')
-                self._stop(connection, active, 'PREPARE_LEASE_EXPIRED')
-            if request.kind != 'CHECK' and not self._ready(connection, profile):
-                raise StoreError('CHECK_REQUIRED')
+            epoch, runtime_epoch = self._new_admission(connection, owner_key, stamp, now, reap_expired=True)
+            preparation_deadline = now + 60
+            if request.kind != 'CHECK':
+                qualification = self._qualification(connection, profile)
+                if qualification is None:
+                    raise StoreError('CHECK_REQUIRED')
+                if selection is not None:
+                    provenance = self._catalog_provenance(stamp, profile, epoch, runtime_epoch, qualification)
+                    catalog = self._current_catalog(connection, owner_key, task, number, selection.catalog_id,
+                                                    provenance, now)
+                    if catalog['model_ids'] is None:
+                        raise StoreError('CATALOG_REFRESH_REQUIRED')
+                    if selection.model_id not in _decoded(catalog['model_ids']):
+                        raise StoreError('MODEL_NOT_ELIGIBLE')
+                    preparation_deadline = min(preparation_deadline, catalog['expires_at'])
             workspace = os.path.normcase(owner.workspace_key)
             paths = tuple(path.casefold() for path in json.loads(payload)['edit_paths'])
             if paths:
@@ -721,7 +893,7 @@ class Store:
                    profile_fingerprint, policy_stamp, opt_epoch, runtime_epoch, state, reserved_at, prepare_deadline)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?)""",
                 (task, number, owner_key, request.kind, payload, digest, profile, _json(asdict(stamp)), epoch,
-                 self._meta(connection, 'runtime_epoch'), now, now + 60),
+                 runtime_epoch, now, preparation_deadline),
             )
             attempt = cursor.lastrowid
             connection.execute('INSERT INTO slot VALUES (1, ?)', (attempt,))
@@ -729,28 +901,36 @@ class Store:
                                    ((workspace, path, attempt) for path in paths))
             if request.kind == 'CHECK':
                 connection.execute('DELETE FROM checks WHERE profile_fingerprint=?', (profile,))
+            elif selection is not None:
+                connection.execute(
+                    """INSERT INTO attempt_models (attempt, catalog_id, model_id, catalog_digest)
+                       VALUES (?, ?, ?, ?)""",
+                    (attempt, selection.catalog_id, selection.model_id, catalog['catalog_digest']),
+                )
+                connection.execute('DELETE FROM model_catalogs WHERE owner=?', (owner_key,))
             return _public_row(self._attempt(connection, key))
 
-    @staticmethod
-    def _previous_reservation(connection, task, number, owner_key, digest):
+    def _previous_reservation(self, connection, task, number, owner_key, digest, selection):
         previous = connection.execute('SELECT * FROM attempts WHERE task_id=? AND attempt_no=?',
                                       (task, number)).fetchone()
         if previous is not None:
             if previous['owner'] != owner_key:
                 raise StoreError('OWNER_MISMATCH')
-            if previous['task_id'] != task or previous['request_digest'] != digest:
+            if (previous['task_id'] != task or previous['request_digest'] != digest
+                    or self._bound_selection(connection, previous['id']) != selection):
                 raise StoreError('CONFLICT')
         return previous
 
-    def lookup_reservation(self, owner, key, request):
+    def lookup_reservation(self, owner, key, request, *, selection=None):
         """Check for an identical replay without checking current admission or creating state."""
         owner = self._owner(owner)
         task, number = _key(key)
         digest = _hash_text(_request(request))
+        selection = _selection(selection, request.kind)
         with self._db() as connection:
             if connection is None:
                 return None
-            previous = self._previous_reservation(connection, task, number, _json(asdict(owner)), digest)
+            previous = self._previous_reservation(connection, task, number, _json(asdict(owner)), digest, selection)
             return _public_row(previous) if previous is not None else None
 
     @staticmethod
@@ -784,9 +964,39 @@ class Store:
         if row['stop_reason'] is not None:
             return row['stop_reason']
         reason = self._check_admission(connection, row, stamp)
+        if (reason is None and row['state'] in ('RESERVED', 'STARTING')
+                and row['kind'] != 'CHECK' and self._clock() >= row['prepare_deadline']
+                and self._bound_selection(connection, row['id']) is not None):
+            reason = 'CATALOG_REFRESH_REQUIRED'
         if reason is not None:
             self._stop(connection, row, reason)
         return reason
+
+    def verify_prepared_start(self, key, owner, stamp):
+        """Read the start gates while the controller holds the native policy lock."""
+        owner = self._owner(owner)
+        with self._db() as connection:
+            row = self._attempt(connection, key, owner=owner)
+            active = connection.execute('SELECT attempt FROM slot').fetchone()
+            if (row['state'] != 'RESERVED' or active is None or active['attempt'] != row['id']
+                    or row['kind'] != 'CHECK' and row['manifest_id'] is None):
+                raise StoreError('INVALID_STATE')
+            denial = self._check_admission(connection, row, stamp)
+            if denial is not None:
+                raise StoreError(denial)
+            if self._clock() >= row['prepare_deadline']:
+                if self._bound_selection(connection, row['id']) is not None:
+                    raise StoreError('CATALOG_REFRESH_REQUIRED')
+                raise StoreError('PREPARE_LEASE_EXPIRED')
+            if row['kind'] != 'CHECK' and self._qualification(connection, row['profile_fingerprint']) is None:
+                raise StoreError('CHECK_REQUIRED')
+            if row['kind'] == 'EDIT':
+                workspace = os.path.normcase(owner.workspace_key)
+                expected = {(workspace, path.casefold()) for path in _decoded(row['request'])['edit_paths']}
+                held = connection.execute('SELECT workspace_key, path_key FROM edit_owners WHERE attempt=?',
+                                          (row['id'],))
+                if {tuple(scope) for scope in held} != expected:
+                    raise StoreError('EDIT_SCOPE_BUSY')
 
     def claim_start(self, key, owner, stamp):
         owner = self._owner(owner)
@@ -802,8 +1012,12 @@ class Store:
                 denial = 'PREPARE_LEASE_EXPIRED'
                 self._stop(connection, row, denial)
             if denial is None:
+                startup_deadline = now + 15
+                if (row['kind'] != 'CHECK' and row['prepare_deadline'] < startup_deadline
+                        and self._bound_selection(connection, row['id']) is not None):
+                    startup_deadline = row['prepare_deadline']
                 return _public_row(self._update(connection, row, state='STARTING',
-                                                 runner_claim=secrets.token_hex(32), startup_deadline=now + 15))
+                                                 runner_claim=secrets.token_hex(32), startup_deadline=startup_deadline))
         raise StoreError(denial)
 
     def claim_runner(self, key, runner_claim, stamp, claimed_process):
@@ -850,6 +1064,7 @@ class Store:
             payload = _decoded(row['request'])
             payload['edit_paths'] = tuple(payload['edit_paths'])
             payload['spec_refs'] = tuple(payload['spec_refs'])
+            selection, catalog_digest = self._bound_model(connection, row['id'])
             return RunSnapshot(
                 view=_public_row(row), request=Request(**payload), profile_fingerprint=row['profile_fingerprint'],
                 manifest_id=row['manifest_id'], runner_claim=row['runner_claim'],
@@ -863,6 +1078,7 @@ class Store:
                 started_at=row['started_at'], resumed_at=row['resumed_at'], process_exit_at=row['process_exit_at'],
                 stopped_at=row['stopped_at'],
                 finished_at=row['finished_at'], received_at=row['received_at'],
+                model_selection=selection, model_catalog_digest=catalog_digest,
             )
 
     def admit_launch(self, key, runner_claim, stamp, launch_metadata):
@@ -1079,8 +1295,23 @@ class Store:
             return {'state': 'FAILED', 'reason': 'PROCESS_REBOOTED'}
         return None
 
+    def _bind_model_result(self, connection, row, result):
+        selection = self._bound_selection(connection, row['id'])
+        requested = result.get('requested_model_id')
+        reported = result.get('reported_model_id')
+        if selection is None:
+            if requested is not None or reported is not None:
+                raise StoreError('INVALID_RESULT')
+            return result
+        if requested is not None and requested != selection.model_id:
+            raise StoreError('INVALID_RESULT')
+        if reported is not None and reported != selection.model_id:
+            result = {'state': 'FAILED', 'reason': 'MODEL_MISMATCH'}
+        result['requested_model_id'] = selection.model_id
+        result['reported_model_id'] = reported
+        return result
+
     def commit_result(self, key, runner_claim, stamp, stop_proof, result):
-        result = _result(result)
         with self._db(writable=True) as connection:
             row = self._runner(connection, key, runner_claim)
             if row['state'] in TERMINAL:
@@ -1088,7 +1319,8 @@ class Store:
             row = self._record_stopped(connection, row, stop_proof)
             stopped = self._stop_result(connection, row, stamp, stop_proof)
             if stopped is not None:
-                return self._publish(connection, row, stopped)
+                return self._publish(connection, row, self._bind_model_result(connection, row, stopped))
+            result = self._bind_model_result(connection, row, _result(result))
             state = result.setdefault('state', 'COMPLETED')
             if state == 'COMPLETED':
                 if row['kind'] == 'CHECK':

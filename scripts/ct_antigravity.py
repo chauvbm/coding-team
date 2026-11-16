@@ -7,6 +7,8 @@ from contextlib import contextmanager, ExitStack
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -30,6 +32,11 @@ _GOOGLE_SIGNER = "Google LLC"
 _VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?")
 _PROFILE_FILE = "agy-session-settings.json"
 _LOG_FILE = "agy-session.log"
+_INSPECTION_DIR = "inspection"
+_INSPECTIONS = ("models", "usage")
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+_MAX_MODELS = 256
+_MAX_QUOTA_GROUPS = 64
 _OUTPUT_PROTOCOL = "stream-json/1"
 _TOOL_GUARD_FILE = "tool-guard.py"
 _TOOL_GUARD_NAME = "coding-team-tool-guard"
@@ -83,7 +90,7 @@ _REVIEWED_BOOTSTRAPS: tuple[tuple[str, str, str], ...] = (
     (
         "8803c289cac04d6e53f2211592d9981c2d5760bc0d9b4a7f222ef6ecc7abb38a",
         "1.5.9",
-        "e899e3f35c5842770ea5a285bad04493dcebfcc7595e62028885d2803f063f57",
+        "c5220089365cc72118bfe7ea0b73b39057b7484955e21c6dfa093cdb286e2899",
     ),
 )
 
@@ -130,6 +137,9 @@ class LaunchSpec:
     settings_path: Path
     edit_paths: tuple[str, ...] = ()
     mcp_inventory: bool = False
+    model_id: str | None = None
+    inspection: str | None = None
+    timeout_s: int = 300
 
 
 @dataclass(frozen=True)
@@ -157,7 +167,7 @@ class CliResult:
     metadata: dict[str, object] = field(default_factory=dict)
 
 
-def _strict_json(raw: bytes) -> object:
+def _strict_json(raw: bytes, *, parse_float=float) -> object:
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -169,7 +179,8 @@ def _strict_json(raw: bytes) -> object:
     def invalid_constant(_):
         raise ValueError("non-finite JSON constant")
 
-    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=invalid_constant)
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
+                      parse_constant=invalid_constant, parse_float=parse_float)
 
 
 def _windows_directory() -> Path:
@@ -341,14 +352,14 @@ def _json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _profile_bytes(role: str, write_targets: tuple[str, ...] = ()) -> bytes:
+def _profile_bytes(role: str, write_targets: tuple[str, ...] = (), *, disable_slash: bool = True) -> bytes:
     allow = [f"write_file({target})" for target in write_targets]
     deny = list(_COMMON_DENY)
     if role == "READ":
         deny.append("write_file(*)")
     return _json_bytes({
         "allowNonWorkspaceAccess": False,
-        "disableSlashCommands": True,
+        "disableSlashCommands": disable_slash,
         "modelProvider": "",
         "permissions": {"allow": allow, "ask": [], "deny": deny},
         "toolPermission": "request-review",
@@ -356,28 +367,35 @@ def _profile_bytes(role: str, write_targets: tuple[str, ...] = ()) -> bytes:
     }) + b"\n"
 
 
-def _session_profile(role: str, workspace: Path, edit_paths: tuple[str, ...]) -> bytes:
+def _session_profile(role: str, workspace: Path, edit_paths: tuple[str, ...], *, inspection: str | None = None) -> bytes:
     if role != "EDIT" and edit_paths:
         raise ValueError("write paths require an EDIT request")
     targets = tuple((workspace / path).as_posix() for path in validate_relative_paths(edit_paths))
-    profile = _profile_bytes(role, targets)
+    profile = _profile_bytes(role, targets, disable_slash=inspection != "usage")
     if len(profile) > _MAX_CONFIG_BYTES:
         raise ValueError("session profile exceeds the size limit")
     return profile
 
 
-def _arguments(settings: Path, log: Path, timeout: str, *, mcp_inventory: bool = False) -> tuple[str, ...]:
+def _arguments(settings: Path, log: Path, timeout: str, *, mcp_inventory: bool = False,
+               model_id: str | None = None, inspection: str | None = None) -> tuple[str, ...]:
     layout = (
         "--gemini_dir", str(settings.parent / "home" / ".gemini"),
         "--app_data_dir", "antigravity-cli",
     )
     if mcp_inventory:
         return (*layout, "mcp", "list")
-    return (
+    if inspection == "models":
+        return (*layout, "models")
+    if inspection == "usage":
+        return (*layout, "--settings", str(settings), "--print", "/usage",
+                "--output-format", "json", "--print-timeout", timeout, "--log-file", str(log))
+    ordinary = (
         "--disable-slash-commands", "--settings", str(settings),
         "--input-format", "text", "--output-format", "stream-json", "--print-timeout", timeout,
         "--log-file", str(log), *layout,
     )
+    return ordinary if model_id is None else (*ordinary, "--model", model_id)
 
 
 def _launch_environment(env: dict[str, str], private_root: Path) -> dict[str, str]:
@@ -557,14 +575,21 @@ def _fingerprint(binary: BinaryMetadata, roots: tuple[Path, ...], workspace: Pat
     for index, root in enumerate(roots):
         _read_custom_dir(root, entries, f"managed/{index}")
     _workspace_sources(workspace, entries)
+    settings, log, timeout = Path("<settings>"), Path("<log>"), "<timeout>"
     templates = {
         role: {
             "settings": hashlib.sha256(_profile_bytes(
                 role, ("C:/projection/edit-target",) if role == "EDIT" else (),
             )).hexdigest(),
-            "args": _arguments(Path("<settings>"), Path("<log>"), "<timeout>"),
+            "args": _arguments(settings, log, timeout),
+            "model_args": _arguments(settings, log, timeout, model_id="<model-id>"),
         }
         for role in _ROLES
+    }
+    inspections = {
+        mode: {"args": _arguments(settings, log, timeout, inspection=mode),
+               "settings": hashlib.sha256(_profile_bytes("READ", disable_slash=mode != "usage")).hexdigest()}
+        for mode in _INSPECTIONS
     }
     document = {"binary": binary.binary_sha256, "version": binary.version,
                 "templates": templates, "bootstrap_files": {name: hashlib.sha256(content).hexdigest()
@@ -577,7 +602,8 @@ def _fingerprint(binary: BinaryMetadata, roots: tuple[Path, ...], workspace: Pat
                 ))).hexdigest(),
                 "tool_guard_binary_sha256": _tool_guard_binary_digests(),
                 "tool_guard_shell": "System32/cmd.exe with AutoRun excluded and no current-directory lookup",
-                "mcp_inventory": _arguments(Path("<settings>"), Path("<log>"), "", mcp_inventory=True)}
+                "mcp_inventory": _arguments(settings, log, "", mcp_inventory=True),
+                "inspections": inspections, "inspection_cwd": _INSPECTION_DIR}
     return hashlib.sha256(_json_bytes(document)).hexdigest()
 
 
@@ -651,18 +677,47 @@ def _outside_projection(private_root: Path, workspace: Path) -> bool:
     return private_root != workspace and not private_root.is_relative_to(workspace)
 
 
+def _valid_model_id(model_id: object) -> bool:
+    return isinstance(model_id, str) and _MODEL_ID.fullmatch(model_id) is not None
+
+
+def _valid_launch_mode(role, timeout_s, mcp_inventory, model_id, inspection, has_prompt, edit_paths):
+    if (role not in _ROLES or type(timeout_s) is not int or not 1 <= timeout_s <= 1800
+            or type(mcp_inventory) is not bool
+            or (model_id is not None and not _valid_model_id(model_id))
+            or (inspection is not None and (inspection not in _INSPECTIONS or mcp_inventory))):
+        return False
+    if mcp_inventory or inspection is not None:
+        return role == "READ" and not has_prompt and not edit_paths and model_id is None
+    return True
+
+
+def _standalone_inspection(workspace: Path) -> None:
+    if any(_plain_stat(parent / ".git") is not None for parent in (workspace, *workspace.parents)):
+        raise ValueError("inspection cannot use a project directory")
+    _only_known_entries(workspace, ())
+
+
 def build_launch(
     preflight: Preflight, role: str, prompt: str, workspace: Path, private_root: Path, timeout_s: int,
     *, edit_paths: tuple[str, ...] = (), mcp_inventory: bool = False,
+    model_id: str | None = None, inspection: str | None = None,
 ) -> LaunchSpec:
-    if (role not in _ROLES or type(timeout_s) is not int or not 1 <= timeout_s <= 1800
-            or type(mcp_inventory) is not bool
-            or (mcp_inventory and (role != "READ" or prompt != "" or edit_paths))):
+    if not _valid_launch_mode(role, timeout_s, mcp_inventory, model_id, inspection, prompt != "", edit_paths):
         raise CliPreflightError("INVALID_REQUEST")
-    data = b"" if mcp_inventory else validate_prompt(prompt)
+    data = b"" if mcp_inventory or inspection is not None else validate_prompt(prompt)
+    try:
+        if not _outside_projection(private_root, workspace) or not _dir_exists(private_root):
+            raise OSError("invalid private directory")
+        if inspection is not None:
+            workspace = private_root / _INSPECTION_DIR
+            _standalone_inspection(workspace)
+            workspace.mkdir()
+    except (OSError, ValueError):
+        raise CliPreflightError("CUSTOMIZATIONS_BLOCKED") from None
     env = _check_contract(preflight, workspace)
     try:
-        profile = _session_profile(role, workspace, edit_paths)
+        profile = _session_profile(role, workspace, edit_paths, inspection=inspection)
     except ValueError:
         raise CliPreflightError("INVALID_REQUEST") from None
     binary = inspect_binary_metadata(env)
@@ -671,8 +726,6 @@ def build_launch(
             or binary._identity != preflight._identity):
         raise CliPreflightError("CHECK_REQUIRED")
     try:
-        if not _outside_projection(private_root, workspace) or not _dir_exists(private_root):
-            raise OSError("invalid private directory")
         settings = private_root / _PROFILE_FILE
         log = private_root / _LOG_FILE
         if _plain_path(log) is not None:
@@ -688,8 +741,10 @@ def build_launch(
                 stream.write(content)
     except OSError:
         raise CliPreflightError("CUSTOMIZATIONS_BLOCKED") from None
-    args = _arguments(settings, log, f"{timeout_s}s", mcp_inventory=mcp_inventory)
-    launch = LaunchSpec(binary.binary_path, args, workspace, child_env, data, role, settings, edit_paths, mcp_inventory)
+    args = _arguments(settings, log, f"{timeout_s}s", mcp_inventory=mcp_inventory,
+                      model_id=model_id, inspection=inspection)
+    launch = LaunchSpec(binary.binary_path, args, workspace, child_env, data, role, settings,
+                        edit_paths, mcp_inventory, model_id, inspection, timeout_s)
     revalidate_launch(preflight, launch)
     return launch
 
@@ -699,23 +754,26 @@ def revalidate_launch(preflight: Preflight, launch: LaunchSpec) -> None:
     env = _check_contract(preflight, launch.cwd)
     if launch.executable != preflight.binary_path or launch.env != _launch_environment(env, launch.settings_path.parent):
         raise CliPreflightError("CHECK_REQUIRED")
-    args = launch.args
     try:
         settings = launch.settings_path
-        timeout = "1s" if launch.mcp_inventory else args[8]
         log = settings.parent / _LOG_FILE
-        if (launch.role not in _ROLES or not re.fullmatch(r"[1-9][0-9]{0,3}s", timeout)
-                or int(timeout[:-1]) > 1800 or type(launch.mcp_inventory) is not bool
-                or (launch.mcp_inventory and (launch.role != "READ" or launch.stdin_bytes or launch.edit_paths))
-                or args != _arguments(settings, log, timeout, mcp_inventory=launch.mcp_inventory)
+        if (not _valid_launch_mode(launch.role, launch.timeout_s, launch.mcp_inventory, launch.model_id,
+                                  launch.inspection, bool(launch.stdin_bytes), launch.edit_paths)
+                or launch.args != _arguments(settings, log, f"{launch.timeout_s}s", mcp_inventory=launch.mcp_inventory,
+                                             model_id=launch.model_id, inspection=launch.inspection)
                 or settings.name != _PROFILE_FILE or not _outside_projection(settings.parent, launch.cwd)
-                or _source_bytes(settings) != _session_profile(launch.role, launch.cwd, launch.edit_paths)):
+                or _source_bytes(settings) != _session_profile(launch.role, launch.cwd, launch.edit_paths,
+                                                               inspection=launch.inspection)):
             raise ValueError("profile changed")
+        if launch.inspection is not None:
+            if launch.cwd != settings.parent / _INSPECTION_DIR:
+                raise ValueError("inspection work directory changed")
+            _standalone_inspection(launch.cwd)
         log_info = _plain_path(log)
         if log_info is not None and not stat.S_ISREG(log_info.st_mode):
             raise OSError("invalid log")
         _verify_managed_config(settings.parent)
-    except (IndexError, ValueError, OSError):
+    except (ValueError, OSError):
         raise CliPreflightError("CHECK_REQUIRED") from None
 
 
@@ -784,8 +842,18 @@ _AUTH = re.compile(r"\b(?:authentication required|unauthenticated|login required
                    r"sign[- ]in required|invalid_grant|expired credentials)\b", re.IGNORECASE)
 _QUOTA = re.compile(r"\b(?:quota (?:is )?(?:exceeded|exhausted)|(?:exceeded|exhausted).{0,80}\bquota|"
                     r"resource_exhausted|rate limit(?:ed| exceeded)|too many requests)\b", re.IGNORECASE)
+_UNKNOWN_MODEL = re.compile(
+    r"^(?:(?:error|agy|jetski):[ \t]*)*(?:invalid model selection \(--model\b|unknown model(?:[ :]|$))",
+    re.IGNORECASE | re.MULTILINE,
+)
 _ANSI_SGR = re.compile(r"\x1b\[[\d;]*m")
 _CONVERSATION = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.ASCII)
+_USAGE_KEYS = ("input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens")
+_USAGE_WINDOWS = ("5h", "weekly")
+_USAGE_GROUP_DESCRIPTION = "Models within this group: "
+_RESET_UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                        r"(?:\.[0-9]{1,9})?(?:Z|\+00:00)")
+_EFFORT_SUFFIX = re.compile(r" \((?:none|minimal|low|medium|high|xhigh|max|ultra|thinking)\)$", re.IGNORECASE)
 _PERMISSION_ERROR = re.compile(
     r'permission check failed for (?P<action>[a-z_]+) "(?P<target>[^\r\n]+)": (?P<detail>.+)', re.DOTALL,
 )
@@ -818,6 +886,16 @@ def _valid_success_response(envelope, *, allow_empty_response=False):
     return True
 
 
+def _runtime_failure(diagnostic: str) -> str | None:
+    if _AUTH.search(diagnostic):
+        return "AUTH_REQUIRED"
+    if _QUOTA.search(diagnostic):
+        return "QUOTA_EXCEEDED"
+    if _UNKNOWN_MODEL.search(diagnostic):
+        return "MODEL_UNAVAILABLE"
+    return None
+
+
 def decode_result(exit_code: int, stdout: bytes, stderr: bytes, overflow: bool) -> CliResult:
     """Return response text only for a clean completion. Export bounded diagnostic metadata."""
     metadata: dict[str, object] = {"exit_code": exit_code}
@@ -848,10 +926,8 @@ def decode_result(exit_code: int, stdout: bytes, stderr: bytes, overflow: bool) 
     errors = diagnostic
     if envelope.get("status") == "ERROR" and isinstance(error, str):
         errors += "\n" + error
-    if _AUTH.search(errors):
-        return CliResult(False, "AUTH_REQUIRED", None, metadata)
-    if _QUOTA.search(errors):
-        return CliResult(False, "QUOTA_EXCEEDED", None, metadata)
+    if reason := _runtime_failure(errors):
+        return CliResult(False, reason, None, metadata)
     if exit_code != 0:
         return CliResult(False, "CLI_EXIT_NONZERO", None, metadata)
     response = envelope.get("response")
@@ -877,9 +953,7 @@ def decode_result(exit_code: int, stdout: bytes, stderr: bytes, overflow: bool) 
     usage = envelope.get("usage")
     if isinstance(usage, dict):
         metadata["usage"] = {
-            key: usage[key] for key in (
-                "input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens",
-            )
+            key: usage[key] for key in _USAGE_KEYS
             if type(usage.get(key)) is int and 0 <= usage[key] < 2**31
         }
     return CliResult(True, "OK", response, metadata)
@@ -913,15 +987,20 @@ def _read_events(stdout):
     return records, result["result"]
 
 
-def _validate_events(records, result, workspace):
-    first = records[0]
+def _validate_init(first, result, workspace):
     init, conversation = first.get("init"), first.get("conversation_id")
     if (first.get("event") != "init" or not isinstance(init, dict)
             or not isinstance(conversation, str) or not _CONVERSATION.fullmatch(conversation)
             or not _same_path(init.get("cwd"), workspace) or init.get("permission_mode") != "request-review"
-            or result.get("conversation_id") != conversation or type(result.get("num_turns")) is not int
-            or result["num_turns"] != 1):
+            or result.get("conversation_id") != conversation):
         raise ValueError("invalid session identity")
+    return init
+
+
+def _validate_events(records, result):
+    if type(result.get("num_turns")) is not int or result["num_turns"] != 1:
+        raise ValueError("invalid turn count")
+    conversation = records[0]["conversation_id"]
     steps = []
     for record in records[1:-1]:
         step = record.get("step_update")
@@ -936,26 +1015,44 @@ def _validate_events(records, result, workspace):
 
 def _stream_result(exit_code, stdout, stderr, overflow, workspace):
     if overflow or len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDERR_BYTES:
-        return decode_result(exit_code, b"", b"", True), None, None
+        return decode_result(exit_code, b"", b"", True), None, None, False
     try:
         records, terminal = _read_events(stdout)
     except (ValueError, RecursionError):
-        return decode_result(exit_code, b"", stderr, False), None, None
+        # An error before session initialization can be a standalone envelope.
+        failure = decode_result(exit_code, stdout, stderr, False)
+        if failure.reason in ("AUTH_REQUIRED", "QUOTA_EXCEEDED", "MODEL_UNAVAILABLE"):
+            return failure, None, None, False
+        return decode_result(exit_code, b"", stderr, False), None, None, False
     result = decode_result(exit_code, _json_bytes(terminal), stderr, False)
-    if not result.ok and result.reason != "PERMISSION_DENIED":
-        return result, None, None
     try:
-        steps = _validate_events(records, terminal, workspace)
+        init = _validate_init(records[0], terminal, workspace)
+        reported_model = init.get("model")
+        if _valid_model_id(reported_model):
+            result.metadata["reported_model_id"] = reported_model
+        if not result.ok and result.reason != "PERMISSION_DENIED":
+            return result, None, None, "model" in init
+        steps = _validate_events(records, terminal)
     except ValueError:
+        if not result.ok and result.reason != "PERMISSION_DENIED":
+            return result, None, None, False
         invalid = CliResult(False, "MALFORMED_OUTPUT", None, {"exit_code": exit_code})
-        return invalid, None, None
-    return result, terminal, steps
+        return invalid, None, None, False
+    return result, terminal, steps, "model" in init
 
 
-def decode_stream_result(exit_code: int, stdout: bytes, stderr: bytes, overflow: bool, *, workspace: Path) -> CliResult:
-    result, _, steps = _stream_result(exit_code, stdout, stderr, overflow, workspace)
-    reason = _ordinary_tool_issue(steps) if result.ok else None
-    return CliResult(False, reason, None, {"exit_code": exit_code}) if reason else result
+def decode_stream_result(exit_code: int, stdout: bytes, stderr: bytes, overflow: bool, *, workspace: Path,
+                         expected_model_id: str | None = None) -> CliResult:
+    result, _, steps, model_reported = _stream_result(exit_code, stdout, stderr, overflow, workspace)
+    if not result.ok:
+        return result
+    if reason := _ordinary_tool_issue(steps):
+        return CliResult(False, reason, None, result.metadata)
+    reported_model = result.metadata.get("reported_model_id")
+    if expected_model_id is not None and model_reported and reported_model != expected_model_id:
+        reason = "MALFORMED_OUTPUT" if reported_model is None else "MODEL_MISMATCH"
+        return CliResult(False, reason, None, result.metadata)
+    return result
 
 
 def _ordinary_tool_issue(steps):
@@ -990,6 +1087,152 @@ def decode_mcp_inventory(exit_code: int, stdout: bytes, stderr: bytes, overflow:
     return result
 
 
+def _inspection_diagnostics(stdout, stderr, overflow, unavailable, *, allowed_stderr=""):
+    if overflow or len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDERR_BYTES:
+        raise CliPreflightError("OUTPUT_OVERFLOW")
+    try:
+        diagnostic = _ANSI_SGR.sub("", stderr.decode("utf-8")).strip()
+    except UnicodeError:
+        raise CliPreflightError(unavailable) from None
+    if reason := _runtime_failure(diagnostic):
+        raise CliPreflightError(reason)
+    if diagnostic and diagnostic != allowed_stderr:
+        raise CliPreflightError(unavailable)
+
+
+def _catalog_label(value, limit=160):
+    return isinstance(value, str) and 0 < len(value) <= limit and value == value.strip() and value.isprintable()
+
+
+def decode_model_catalog(exit_code: int, stdout: bytes, stderr: bytes, overflow: bool) -> list[dict[str, str]]:
+    """Read the signed CLI's headerless model ID and label TSV."""
+    unavailable = "MODEL_CATALOG_UNAVAILABLE"
+    _inspection_diagnostics(stdout, stderr, overflow, unavailable, allowed_stderr="Fetching available models...")
+    if exit_code != 0:
+        raise CliPreflightError(unavailable)
+    try:
+        lines = stdout.decode("utf-8").replace("\r\n", "\n").removesuffix("\n").split("\n")
+    except UnicodeError:
+        raise CliPreflightError(unavailable) from None
+    if not 1 <= len(lines) <= _MAX_MODELS:
+        raise CliPreflightError(unavailable)
+    models = []
+    ids = set()
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) != 2:
+            raise CliPreflightError(unavailable)
+        model_id, label = parts
+        if not _valid_model_id(model_id) or model_id in ids or not _catalog_label(label):
+            raise CliPreflightError(unavailable)
+        ids.add(model_id)
+        models.append({"id": model_id, "label": label})
+    return models
+
+
+def _quota_envelope(stdout: bytes):
+    terminal = _strict_json(stdout, parse_float=Decimal)
+    if not isinstance(terminal, dict):
+        raise ValueError("invalid usage terminal")
+    error = terminal.get("error", "")
+    if terminal.get("status") == "ERROR" and isinstance(error, str) and (reason := _runtime_failure(error)):
+        raise CliPreflightError(reason)
+    usage, turns, command = terminal.get("usage"), terminal.get("num_turns"), terminal.get("command")
+    if (terminal.get("status") != "SUCCESS" or error != "" or type(turns) is not int or turns != 0
+            or not isinstance(usage, dict) or not all(key in usage for key in _USAGE_KEYS)
+            or any(type(value) is not int or value != 0 for value in usage.values())
+            or not isinstance(command, dict) or command.get("name") != "usage"):
+        raise ValueError("invalid usage terminal")
+    data = command.get("data")
+    groups = data.get("groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list) or not 1 <= len(groups) <= _MAX_QUOTA_GROUPS:
+        raise ValueError("invalid groups")
+    return groups
+
+
+def _quota_windows(buckets, now):
+    if not isinstance(buckets, list) or len(buckets) > 16:
+        raise ValueError("invalid buckets")
+    windows = {}
+    seen = set()
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            raise ValueError("invalid bucket")
+        window = bucket.get("window")
+        if window not in _USAGE_WINDOWS:
+            continue
+        if window in seen or not _valid_model_id(bucket.get("id")):
+            raise ValueError("invalid quota window identity")
+        seen.add(window)
+        fraction, reset = bucket.get("remaining_fraction"), bucket.get("reset_time")
+        if fraction is None or reset is None or bucket.get("disabled", False) is not False:
+            continue
+        if (type(fraction) not in (int, Decimal) or not 0 <= fraction <= 1
+                or not isinstance(reset, str) or not _RESET_UTC.fullmatch(reset)):
+            raise ValueError("invalid quota window values")
+        display_fraction = float(fraction)
+        if display_fraction == 0 and fraction != 0:
+            continue
+        if datetime.fromisoformat(reset) > now:
+            windows[window] = {"remaining_fraction": display_fraction, "reset_time": reset}
+    return windows
+
+
+def _quota_members(group):
+    for key in ("model_ids", "models"):
+        if key not in group:
+            continue
+        values = group[key]
+        if not isinstance(values, list) or len(values) > _MAX_MODELS:
+            raise ValueError("invalid model membership")
+        ids = [value.get("id") if isinstance(value, dict) and key == "models" else value for value in values]
+        if not all(_valid_model_id(value) for value in ids) or len(set(ids)) != len(ids):
+            raise ValueError("invalid model membership")
+        return True, ids
+    description = group.get("description")
+    if _catalog_label(description, 1024) and description.startswith(_USAGE_GROUP_DESCRIPTION):
+        labels = [label.strip() for label in description.removeprefix(_USAGE_GROUP_DESCRIPTION).split(",")]
+        return False, [label for label in labels if _catalog_label(label)]
+    return False, []
+
+
+def decode_quota_report(exit_code: int, stdout: bytes, stderr: bytes, overflow: bool, *, models) -> dict:
+    """Return observed quota windows and mappings for this catalog, omitting unknown memberships."""
+    unavailable = "QUOTA_UNAVAILABLE"
+    _inspection_diagnostics(stdout, stderr, overflow, unavailable)
+    groups, windows_by_group, by_id, by_label = [], {}, {}, {}
+    now = datetime.now(timezone.utc)
+    try:
+        observed_groups = _quota_envelope(stdout)
+        if exit_code != 0:
+            raise ValueError("usage failed")
+        for group in observed_groups:
+            name = group.get("name") if isinstance(group, dict) else None
+            if not _catalog_label(name) or name in windows_by_group:
+                raise ValueError("invalid quota group name")
+            windows = _quota_windows(group.get("buckets"), now)
+            groups.append({"name": name, "windows": windows})
+            windows_by_group[name] = windows
+            explicit, values = _quota_members(group)
+            memberships = by_id if explicit else by_label
+            for value in values:
+                memberships.setdefault(value, set()).add(name)
+    except (ValueError, RecursionError, InvalidOperation):
+        raise CliPreflightError(unavailable) from None
+    if not any(windows_by_group.values()):
+        raise CliPreflightError(unavailable)
+    model_groups, exhausted = {}, []
+    for model in models:
+        model_id, label = model["id"], model["label"]
+        matches = by_id.get(model_id) or by_label.get(label) or by_label.get(_EFFORT_SUFFIX.sub("", label), ())
+        if len(matches) == 1:
+            name, = matches
+            model_groups[model_id] = name
+            if any(window["remaining_fraction"] == 0 for window in windows_by_group[name].values()):
+                exhausted.append(model_id)
+    return {"groups": groups, "model_groups": model_groups, "exhausted_model_ids": exhausted}
+
+
 def _denial_matches(step, actions, matches_target):
     message = _stream_call_error(step)
     match = _PERMISSION_ERROR.fullmatch(message) if message else None
@@ -1018,7 +1261,7 @@ def decode_check_result(
     exit_code: int, stdout: bytes, stderr: bytes, overflow: bool, *, workspace: Path,
     tool: str, target: str, denied: bool, marker: str,
 ) -> CliResult:
-    result, terminal, steps = _stream_result(exit_code, stdout, stderr, overflow, workspace)
+    result, terminal, steps, _ = _stream_result(exit_code, stdout, stderr, overflow, workspace)
     if steps is None or (not denied and not result.ok):
         return result
     unproven = CliResult(False, "CHECK_UNPROVEN", None, {"exit_code": exit_code})

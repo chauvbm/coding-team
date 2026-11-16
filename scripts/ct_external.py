@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -22,7 +23,7 @@ import ct_antigravity as agy
 import ct_policy
 import ct_storage as storage
 import ct_winjob as winjob
-from ct_external_store import AttemptKey, Owner, Request, StopProof, Store, StoreError
+from ct_external_store import AttemptKey, ModelSelection, Owner, Request, StopProof, Store, StoreError
 import ct_external_workspace as projection
 
 
@@ -31,6 +32,7 @@ _CONTROL = re.compile(r"[\t ]*/(?:coding-team|team-coding)[\t ]+antigravity[\t ]
 _TERMINAL = frozenset(("COMPLETED", "FAILED", "CANCELED", "TIMED_OUT"))
 _POLL_S = 0.5
 _START_LEASE_S = 15
+_DISCOVERY_TIMEOUT_S = 10
 _CHECK_TIMEOUT_S = 900
 _MAX_INPUT = 256 * 1024
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
@@ -235,6 +237,11 @@ def _summary(value):
     return "".join(char for char in value[:4096] if char.isprintable() or char in "\t\n").strip()
 
 
+def _catalog_digest(models):
+    ordered = sorted(models, key=lambda model: model["id"])
+    return hashlib.sha256(json.dumps(ordered, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
 def _canary_matches(path, data):
     return (_absolute_unlinked(path) == path and path.is_file()
             and path.stat().st_size == len(data) and path.read_bytes() == data)
@@ -325,12 +332,126 @@ class ExternalService:
             self._drain_unused_projections()
         return self.status(owner)
 
-    def reserve(self, owner, key, request):
+    def discover(self, owner, key):
+        """Collect fresh account options without an ordinary worker or project files."""
+        preflight = self._preflight()
+        if preflight.reason != "OK":
+            raise ExternalError(preflight.reason)
+        profile = preflight.config_fingerprint
+        with storage.locked(self.install_lock):
+            if self.binding is not None:
+                self.binding.verify(admission=True)
+            with storage.locked(self.policy_path):
+                expected = self.store.discovery_stamp(owner, key, self._stamp(owner), profile)
+
+            def verify():
+                self.store.verify_discovery_stamp(owner, key, self._stamp(owner), profile, expected)
+
+            with tempfile.TemporaryDirectory(prefix="model-discovery-", dir=self.store.root) as directory:
+                root = _absolute_unlinked(Path(directory))
+                workspace = root / "empty"
+                workspace.mkdir()
+                models = self._read_model_catalog(preflight, workspace, root / "catalog", verify)
+                digest = _catalog_digest(models)
+                try:
+                    usage = self._discovery_output(preflight, workspace, root / "quota", "usage", verify)
+                except TimeoutError:
+                    usage = None
+                if usage is not None and usage.exit_code == 0 and not usage.overflow:
+                    current = self._read_model_catalog(preflight, workspace, root / "refresh", verify)
+                    if _catalog_digest(current) != digest:
+                        raise ExternalError("CATALOG_REFRESH_REQUIRED")
+            with storage.locked(self.policy_path):
+                verify()
+                quota_status = "QUOTA_UNAVAILABLE"
+                quota = {}
+                if usage is not None:
+                    try:
+                        quota = agy.decode_quota_report(
+                            usage.exit_code, usage.stdout, usage.stderr, usage.overflow, models=models,
+                        )
+                    except agy.CliPreflightError as error:
+                        if error.reason == "AUTH_REQUIRED":
+                            raise
+                        quota_status = error.reason
+                    else:
+                        quota_status = "OK"
+                exhausted = set(quota.get("exhausted_model_ids", ()))
+                selectable = [model["id"] for model in models if model["id"] not in exhausted]
+                if not selectable:
+                    return {
+                        "ok": True, "state": "NATIVE_REQUIRED", "reason": "QUOTA_EXCEEDED",
+                        "task_id": key.task_id, "attempt_no": key.attempt_no,
+                        "models": models, "quota_status": quota_status, **quota,
+                    }
+                catalog_id = self.store.record_catalog(
+                    owner, key, self._stamp(owner), profile, expected, selectable, catalog_digest=digest,
+                )
+        return {
+            "ok": True, "state": "MODEL_OPTIONS", "reason": None,
+            "task_id": key.task_id, "attempt_no": key.attempt_no,
+            "models": models, "quota_status": quota_status, "catalog_id": catalog_id, **quota,
+        }
+
+    def _read_model_catalog(self, preflight, workspace, private, verify):
+        try:
+            result = self._discovery_output(preflight, workspace, private, "models", verify)
+        except TimeoutError:
+            raise ExternalError("MODEL_CATALOG_UNAVAILABLE") from None
+        return agy.decode_model_catalog(result.exit_code, result.stdout, result.stderr, result.overflow)
+
+    def _discovery_output(self, preflight, workspace, private, inspection, verify):
+        private.mkdir()
+        launch = agy.build_launch(
+            preflight, "READ", "", workspace, private, _DISCOVERY_TIMEOUT_S, inspection=inspection,
+        )
+        try:
+            with agy.guard_launch(preflight, launch), winjob.spawn_suspended(launch, winjob.new_job_name()) as job:
+                with storage.locked(self.policy_path):
+                    verify()
+                    agy.revalidate_launch(preflight, launch)
+                    job.resume()
+                deadline = time.monotonic() + _DISCOVERY_TIMEOUT_S
+                while (remaining := deadline - time.monotonic()) > 0:
+                    with storage.locked(self.policy_path, timeout=_POLL_S):
+                        verify()
+                    agy.revalidate_launch(preflight, launch)
+                    state = job.poll()
+                    if state.overflow:
+                        return winjob.CapturedOutput(1, b"", b"", True)
+                    if state.root_exit_code is not None and not state.active_processes:
+                        return job.get_output()
+                    time.sleep(min(_POLL_S, remaining))
+        except winjob.JobError as error:
+            raise ExternalError(error.code) from None
+        raise TimeoutError("Discovery deadline")
+
+    def _verify_catalog_before_start(self, owner, key, prior):
+        if prior.model_selection is None or prior.model_catalog_digest is None:
+            raise ExternalError("MODEL_SELECTION_REQUIRED")
+        preflight = self._preflight()
+        if preflight.reason != "OK" or preflight.config_fingerprint != prior.profile_fingerprint:
+            raise ExternalError("PROFILE_CHANGED")
+
+        def verify():
+            self.store.verify_prepared_start(key, owner, self._stamp(owner))
+
+        with tempfile.TemporaryDirectory(prefix="model-discovery-", dir=self.store.root) as directory:
+            root = _absolute_unlinked(Path(directory))
+            workspace = root / "empty"
+            workspace.mkdir()
+            models = self._read_model_catalog(preflight, workspace, root / "recheck", verify)
+            if _catalog_digest(models) != prior.model_catalog_digest:
+                raise ExternalError("CATALOG_REFRESH_REQUIRED")
+
+    def reserve(self, owner, key, request, *, selection=None):
         if request.kind != "CHECK":
             # Check the complete UTF-8 request text before creating any attempt.
             agy.validate_prompt(self._prompt(request))
-        current = self.store.lookup_reservation(owner, key, request)
+        current = self.store.lookup_reservation(owner, key, request, selection=selection)
         if current is None:
+            if request.kind != "CHECK" and self.binding is not None and selection is None:
+                raise ExternalError("MODEL_SELECTION_REQUIRED")
             # Executable signature verification can be slow. Runners must be able
             # to check their native policy while another caller prepares admission.
             if self._stamp(owner).effective != "ON":
@@ -343,7 +464,9 @@ class ExternalService:
             with self._admission(owner) as stamp:
                 if stamp.effective != "ON":
                     raise ExternalError("POLICY_OFF")
-                current = self.store.reserve(owner, key, request, stamp, preflight.config_fingerprint)
+                current = self.store.reserve(
+                    owner, key, request, stamp, preflight.config_fingerprint, selection=selection,
+                )
             self._drain_unused_projections()
         if current.state != "RESERVED":
             return _view(current)
@@ -367,17 +490,28 @@ class ExternalService:
     def start(self, owner, key):
         if self.binding is None:
             raise ExternalError("INSTALLATION_INCOMPATIBLE")
-        with self._admission(owner) as stamp:
-            prior = self.store.run_snapshot(key, owner=owner)
-            if prior.view.state != "RESERVED":
-                return _view(prior.view, acknowledged=prior.claimed_process is not None)
-            try:
-                self.store.claim_start(key, owner, stamp)
-            except StoreError as error:
-                start_failure = error
-            else:
-                start_failure = None
-            snapshot = self.store.run_snapshot(key, owner=owner)
+        with storage.locked(self.install_lock):
+            self.binding.verify(admission=True)
+            with storage.locked(self.policy_path):
+                prior = self.store.run_snapshot(key, owner=owner)
+                if prior.view.state != "RESERVED":
+                    return _view(prior.view, acknowledged=prior.claimed_process is not None)
+            if prior.request.kind != "CHECK":
+                try:
+                    self._verify_catalog_before_start(owner, key, prior)
+                except (OSError, ValueError, agy.CliPreflightError) as error:
+                    with storage.locked(self.policy_path):
+                        self.store.cancel(owner, key, _state_failure(error))
+                    self._drain_unused_projections()
+                    raise
+            with storage.locked(self.policy_path):
+                try:
+                    self.store.claim_start(key, owner, self._stamp(owner))
+                except StoreError as error:
+                    start_failure = error
+                else:
+                    start_failure = None
+                snapshot = self.store.run_snapshot(key, owner=owner)
         if start_failure is not None:
             self._drain_unused_projections()
             raise start_failure
@@ -501,7 +635,7 @@ class ExternalService:
         return proof
 
     def _run_job(self, snapshot, role, workspace, private_root, prompt, deadline=None, *,
-                 edit_paths=(), mcp_inventory=False):
+                 edit_paths=(), mcp_inventory=False, model_id=None):
         key, owner, claim = snapshot.view.key, snapshot.view.owner, snapshot.runner_claim
         job = identity = launch = preflight = None
         guards = ExitStack()
@@ -516,7 +650,7 @@ class ExternalService:
             private_root.mkdir()
             launch = agy.build_launch(preflight, role, prompt, workspace, private_root,
                                       min(snapshot.request.timeout_s, max(1, int(time_left + 0.99))),
-                                      edit_paths=edit_paths, mcp_inventory=mcp_inventory)
+                                      edit_paths=edit_paths, mcp_inventory=mcp_inventory, model_id=model_id)
             name = winjob.new_job_name()
             guards.enter_context(agy.guard_launch(preflight, launch))
             with storage.locked(self.policy_path):
@@ -600,15 +734,20 @@ class ExternalService:
             return self.store.commit_result(key, claim, stamp, proof, result)
 
     def _run_ordinary(self, snapshot, manifest, root):
+        if snapshot.model_selection is None:
+            return self._finish(snapshot, self._proof_without_job(snapshot),
+                                {"state": "FAILED", "reason": "MODEL_SELECTION_REQUIRED"})
+        model_id = snapshot.model_selection.model_id
         proof, output, preflight, launch, reason = self._run_job(
             snapshot, snapshot.request.kind, manifest.project, root / "cli-private", self._prompt(snapshot.request),
-            edit_paths=tuple(manifest.edit),
+            edit_paths=tuple(manifest.edit), model_id=model_id,
         )
-        result = {"state": "FAILED", "reason": reason}
+        result = {"state": "FAILED", "reason": reason, "requested_model_id": model_id}
         if output is not None:
             decoded = agy.decode_stream_result(output.exit_code, output.stdout, output.stderr, output.overflow,
-                                               workspace=manifest.project)
-            result.update(exit_code=output.exit_code, reason=decoded.reason)
+                                                workspace=manifest.project, expected_model_id=model_id)
+            result.update(exit_code=output.exit_code, reason=decoded.reason,
+                          reported_model_id=decoded.metadata.get("reported_model_id"))
             if decoded.ok:
                 try:
                     frozen = projection.freeze(manifest, snapshot.request.kind, root / "result", proof)
@@ -1045,12 +1184,17 @@ def external_command(args, source, cfg, env, home, stream):
                 raise ExternalError("INVALID_READ_GRANT") from None
             return _command_result(service.wait_result(key, grant, args.wait_seconds))
         owner = binding.owner(chat_id_from_env(cfg, env))
+        if operation == "discover":
+            return _command_result(service.discover(owner, key))
         if operation == "reserve":
             if not args.request_stdin:
                 raise ExternalError("REQUEST_REQUIRED")
             payload = _safe_json(_input(stream))
             if payload.get("kind") == "CHECK":
                 raise ExternalError("INVALID_REQUEST")
+            selection = None
+            if "catalog_id" in payload or "model_id" in payload:
+                selection = ModelSelection(payload.pop("catalog_id", None), payload.pop("model_id", None))
             for field in ("edit_paths", "spec_refs"):
                 if field in payload:
                     if not isinstance(payload[field], list):
@@ -1060,7 +1204,7 @@ def external_command(args, source, cfg, env, home, stream):
                 request = Request(**payload)
             except TypeError:
                 raise ExternalError("INVALID_REQUEST") from None
-            return _command_result(service.reserve(owner, key, request))
+            return _command_result(service.reserve(owner, key, request, selection=selection))
         if operation == "grant-read":
             grant = service.store.grant_read(owner, key, args.ttl_seconds)
             return _command_result({"ok": True, "task_id": key.task_id, "attempt_no": key.attempt_no,

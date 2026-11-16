@@ -1,4 +1,5 @@
 import importlib.util
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -264,16 +265,20 @@ class AntigravityCliTests(unittest.TestCase):
 
     def test_stream_reports_a_runtime_denial_even_with_success_and_empty_stderr(self):
         records = self._check_stream()
+        records[0]["init"]["model"] = "example-model"
         wire = b"".join(json.dumps(record).encode("utf-8") + b"\n" for record in records)
-        result = agy.decode_stream_result(0, wire, b"", False, workspace=self.workspace)
+        result = agy.decode_stream_result(0, wire, b"", False, workspace=self.workspace,
+                                         expected_model_id="requested-model")
         self.assertEqual(result.reason, "PERMISSION_DENIED")
         self.assertIsNone(result.response)
+        self.assertEqual(result.metadata.get("reported_model_id"), "example-model")
 
     def test_stream_cannot_publish_success_after_an_unsafe_or_failed_call(self):
         for tool, state, reason in (("run_command", "DONE", "TOOL_POLICY_VIOLATION"),
                                     ("read_file", "ERROR", "CLI_TOOL_ERROR")):
             with self.subTest(tool=tool, state=state):
                 records = self._check_stream(tool=tool, state=state)
+                records[0]["init"]["model"] = "example-model"
                 info = records[2]["step_update"]["tool_info"]
                 if state == "ERROR":
                     info["error"] = {"type": "UNRECOGNIZED", "message": "failed"}
@@ -281,6 +286,7 @@ class AntigravityCliTests(unittest.TestCase):
                 result = agy.decode_stream_result(0, wire, b"", False, workspace=self.workspace)
                 self.assertEqual(result.reason, reason)
                 self.assertIsNone(result.response)
+                self.assertEqual(result.metadata.get("reported_model_id"), "example-model")
 
     def test_check_rejects_a_canary_split_between_response_deltas(self):
         records = self._check_stream()
@@ -400,6 +406,222 @@ class AntigravityCliTests(unittest.TestCase):
         for sentinel in ("private-prompt-sentinel", "extract-sentinel", "gateway-sentinel", "key-sentinel",
                          "orchestration-sentinel", "untrusted-path-sentinel"):
             self.assertNotIn(sentinel, json.dumps(observed) + settings.read_text(encoding="utf-8"))
+
+    def test_model_pin_is_literal_and_cannot_drift(self):
+        preflight = self.qualified()
+        chosen = "gemini-3.8-flash-low"
+        for model in ("--dangerously-skip-permissions", "one two", "invalid\nslug", "x" * 129):
+            with self.assertRaises(agy.CliPreflightError) as error:
+                agy.build_launch(preflight, "READ", "fixture", self.workspace, self.private, 31, model_id=model)
+            self.assertEqual(error.exception.reason, "INVALID_REQUEST")
+        spec = agy.build_launch(preflight, "READ", "fixture", self.workspace, self.private, 31, model_id=chosen)
+        self.assertEqual(spec.args[-2:], ("--model", chosen))
+        self.assertIn("--disable-slash-commands", spec.args)
+        with agy.guard_launch(preflight, spec):
+            pass
+        with self.assertRaises(agy.CliPreflightError) as error:
+            agy.revalidate_launch(preflight, replace(spec, args=(*spec.args[:-1], "another-model")))
+        self.assertEqual(error.exception.reason, "CHECK_REQUIRED")
+
+    def test_inspections_have_fixed_argv_and_private_empty_cwd(self):
+        preflight = self.qualified()
+        (self.workspace / "project-data.txt").write_text("caller data", encoding="utf-8")
+        for mode in ("models", "usage"):
+            private = self.private / mode
+            private.mkdir()
+            spec = agy.build_launch(preflight, "READ", "", self.workspace, private, 8, inspection=mode)
+            self.assertEqual(spec.cwd, private / "inspection")
+            self.assertEqual(list(spec.cwd.iterdir()), [])
+            self.assertEqual(spec.stdin_bytes, b"")
+            self.assertEqual(Path(spec.env["HOME"]), private / "home")
+            settings = json.loads(spec.settings_path.read_bytes())
+            self.assertFalse(settings["allowNonWorkspaceAccess"])
+            self.assertIn("write_file(*)", settings["permissions"]["deny"])
+            self.assertEqual(settings["disableSlashCommands"], mode == "models")
+            if mode == "models":
+                self.assertEqual(spec.args[-1], "models")
+                self.assertNotIn("--output-format", spec.args)
+            else:
+                index = spec.args.index("--print")
+                self.assertEqual(spec.args[index:index + 4], ("--print", "/usage", "--output-format", "json"))
+                self.assertNotIn("--disable-slash-commands", spec.args)
+            with agy.guard_launch(preflight, spec):
+                pass
+            for tampered in (replace(spec, stdin_bytes=b"/arbitrary"), replace(spec, cwd=self.workspace),
+                             replace(spec, args=(*spec.args, "--dangerously-skip-permissions"))):
+                with self.assertRaises(agy.CliPreflightError) as error:
+                    agy.revalidate_launch(preflight, tampered)
+                self.assertEqual(error.exception.reason, "CHECK_REQUIRED")
+
+    def test_inspections_reject_model_requests_and_workspaces_inside_git(self):
+        preflight = self.qualified()
+        cases = (("READ", "some other prompt", {"inspection": "usage"}),
+                 ("EDIT", "", {"inspection": "models"}),
+                 ("READ", "", {"inspection": "usage", "mcp_inventory": True}),
+                 ("READ", "", {"inspection": "usage", "model_id": "a-model"}),
+                 ("READ", "", {"inspection": "usage", "edit_paths": ("target",)}),
+                 ("READ", "", {"inspection": "/arbitrary"}))
+        for role, prompt, options in cases:
+            with self.subTest(options=options), self.assertRaises(agy.CliPreflightError) as error:
+                agy.build_launch(preflight, role, prompt, self.workspace, self.private, 8, **options)
+            self.assertEqual(error.exception.reason, "INVALID_REQUEST")
+        (self.private / ".git").mkdir()
+        with self.assertRaises(agy.CliPreflightError) as error:
+            agy.build_launch(preflight, "READ", "", self.workspace, self.private, 8, inspection="models")
+        self.assertEqual(error.exception.reason, "CUSTOMIZATIONS_BLOCKED")
+
+    def test_model_catalog_decodes_observed_tsv_and_rejects_invalid_or_ambiguous_results(self):
+        rows = (b"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\r\n"
+                b"claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\r\n")
+        models = agy.decode_model_catalog(0, rows, b"", False)
+        self.assertEqual([(m["id"], m["label"]) for m in models],
+                         [("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+                          ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)")])
+        invalid = (b"", b'{"models": []}', rows * 2, rows + b"na\tcontrol\x1b\n",
+                   rows + b"-option\tlabel\n", rows + b"model\tlabel\textra\n")
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(agy.CliPreflightError) as error:
+                agy.decode_model_catalog(0, value, b"", False)
+            self.assertEqual(error.exception.reason, "MODEL_CATALOG_UNAVAILABLE")
+        with self.assertRaises(agy.CliPreflightError) as error:
+            agy.decode_model_catalog(0, rows, b"", True)
+        self.assertEqual(error.exception.reason, "OUTPUT_OVERFLOW")
+
+    def _usage_wire(self, groups, **updates):
+        terminal = {"status": "SUCCESS", "num_turns": 0, "duration_seconds": 0,
+                    "usage": dict.fromkeys(("input_tokens", "output_tokens", "thinking_tokens",
+                                            "cache_read_tokens", "total_tokens"), 0),
+                    "command": {"name": "usage", "data": {"groups": groups}}}
+        terminal.update(updates)
+        return json.dumps(terminal).encode("utf-8")
+
+    def test_quota_maps_exact_labels_or_members_and_only_current_zero_exhausts(self):
+        models = [{"id": "alpha-hi", "label": "Example Flash (High)"},
+                  {"id": "alpha-low", "label": "Example Flash (Low)"},
+                  {"id": "beta", "label": "Example Pro (Thinking)"},
+                  {"id": "gamma", "label": "Example Flash 2"},
+                  {"id": "unknown", "label": "Unknown (High)"}]
+        groups = [
+            {"name": "Example", "description": "Models within this group: Example Flash",
+             "buckets": [{"id": "alpha-weekly", "window": "weekly", "remaining_fraction": 0.25,
+                          "reset_time": "2080-11-22T10:07:30Z"},
+                         {"id": "alpha-5h", "window": "5h", "remaining_fraction": 0,
+                          "reset_time": "2080-11-16T08:17:47Z"}]},
+            {"name": "Other", "model_ids": ["beta"],
+             "description": "Models within this group: Example Flash 2, Unknown",
+             "buckets": [{"id": "beta-5h", "window": "5h", "remaining_fraction": 0,
+                          "reset_time": "2000-11-16T11:42:16Z"},
+                         {"id": "beta-weekly", "window": "weekly", "remaining_fraction": 0.5,
+                          "reset_time": "2080-11-16T11:42:16Z"}]},
+        ]
+        report = agy.decode_quota_report(0, self._usage_wire(groups), b"", False, models=models)
+        self.assertEqual(report["model_groups"], {"alpha-hi": "Example", "alpha-low": "Example", "beta": "Other"})
+        self.assertEqual(report["exhausted_model_ids"], ["alpha-hi", "alpha-low"])
+        self.assertEqual(report["groups"][0]["windows"]["weekly"]["remaining_fraction"], 0.25)
+        self.assertNotIn("5h", report["groups"][1]["windows"])
+
+    def test_quota_rejects_invalid_diagnostics_and_preserves_auth_reason(self):
+        invalid = (self._usage_wire([]), self._usage_wire([], num_turns=1),
+                   self._usage_wire([{"name": "Invalid", "buckets": [
+                       {"id": "invalid", "window": "weekly", "remaining_fraction": True,
+                        "reset_time": "2080-11-16T11:42:16Z"}]}]),
+                   b'{"command":{"name":"usage","data":{"groups":[]}}}')
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(agy.CliPreflightError) as error:
+                agy.decode_quota_report(0, value, b"", False, models=[])
+            self.assertEqual(error.exception.reason, "QUOTA_UNAVAILABLE")
+        for stdout, stderr in ((b"", b"authentication required"),
+                               (b'{"status":"ERROR","error":"authentication required"}', b"")):
+            with self.assertRaises(agy.CliPreflightError) as error:
+                agy.decode_quota_report(1, stdout, stderr, False, models=[])
+            self.assertEqual(error.exception.reason, "AUTH_REQUIRED")
+
+    def test_quota_never_rounds_a_positive_balance_down_to_exhausted(self):
+        groups = [{"name": "Example", "model_ids": ["example-flash"], "buckets": [
+            {"id": "tiny", "window": "5h", "remaining_fraction": "TINY",
+             "reset_time": "2080-11-16T11:42:16Z"},
+            {"id": "known", "window": "weekly", "remaining_fraction": 1,
+             "reset_time": "2080-11-16T11:42:16Z"},
+        ]}]
+        wire = self._usage_wire(groups).replace(b'"TINY"', b"1e-500")
+        models = [{"id": "example-flash", "label": "Example Flash"}]
+        report = agy.decode_quota_report(0, wire, b"", False, models=models)
+        self.assertEqual(report["exhausted_model_ids"], [])
+        self.assertNotIn("5h", report["groups"][0]["windows"])
+
+    def test_quota_prefers_explicit_id_then_exact_label_and_preserves_ambiguity(self):
+        models = [{"id": "example", "label": "Example"},
+                  {"id": "example-ultra", "label": "Example (Ultra)"},
+                  {"id": "example-hi", "label": "Example (High)"},
+                  {"id": "preferred", "label": "Example"}]
+        groups = [
+            {"name": "Base", "description": "Models within this group: Example"},
+            {"name": "Ultra", "description": "Models within this group: Example (Ultra)"},
+            {"name": "Direct", "model_ids": ["preferred"]},
+        ]
+        for group, fraction in zip(groups, (0, 1, 1)):
+            group["buckets"] = [{"id": group["name"].lower(), "window": "weekly", "remaining_fraction": fraction,
+                                "reset_time": "2080-11-16T11:42:16Z"}]
+        report = agy.decode_quota_report(0, self._usage_wire(groups), b"", False, models=models)
+        self.assertEqual(report["model_groups"], {"example": "Base", "example-hi": "Base",
+                                                 "example-ultra": "Ultra", "preferred": "Direct"})
+        self.assertEqual(report["exhausted_model_ids"], ["example", "example-hi"])
+        groups.append({**groups[1], "name": "Conflicting Ultra"})
+        report = agy.decode_quota_report(0, self._usage_wire(groups), b"", False, models=models)
+        self.assertNotIn("example-ultra", report["model_groups"])
+        self.assertNotIn("example-ultra", report["exhausted_model_ids"])
+
+    def test_stream_reports_exact_model_and_refuses_a_verified_mismatch(self):
+        records = self._check_stream()[::3]
+        def decode(**options):
+            wire = b"\n".join(json.dumps(record).encode("utf-8") for record in records)
+            return agy.decode_stream_result(0, wire, b"", False, workspace=self.workspace, **options)
+
+        chosen = "gemini-3.8-flash-low"
+        unverified = decode(expected_model_id=chosen)
+        self.assertTrue(unverified.ok)
+        self.assertNotIn("reported_model_id", unverified.metadata)
+        for invalid in (None, "", "Example model (High)", {"id": chosen}, "--unsafe"):
+            with self.subTest(invalid=invalid):
+                records[0]["init"]["model"] = invalid
+                malformed = decode(expected_model_id=chosen)
+                self.assertEqual((malformed.ok, malformed.reason, malformed.response),
+                                 (False, "MALFORMED_OUTPUT", None))
+                self.assertNotIn("reported_model_id", malformed.metadata)
+        records[0]["init"]["model"] = chosen
+        self.assertEqual(decode(expected_model_id=chosen).metadata["reported_model_id"], chosen)
+        mismatch = decode(expected_model_id="gemini-3.8-flash-high")
+        self.assertEqual((mismatch.ok, mismatch.reason, mismatch.response), (False, "MODEL_MISMATCH", None))
+        self.assertEqual(mismatch.metadata["reported_model_id"], chosen)
+
+    def test_stream_runtime_quota_failure_preserves_only_valid_model_evidence(self):
+        records = self._check_stream()[::3]
+        choice = "example-model"
+        records[-1]["result"].update(status="ERROR", response="", error="quota exceeded", num_turns=0)
+
+        def decode():
+            wire = b"\n".join(json.dumps(record).encode("utf-8") for record in records)
+            result = agy.decode_stream_result(1, wire, b"", False, workspace=self.workspace,
+                                             expected_model_id="requested-model")
+            self.assertEqual((result.reason, result.response), ("QUOTA_EXCEEDED", None))
+            return result.metadata
+
+        self.assertNotIn("reported_model_id", decode())
+        records[0]["init"]["model"] = None
+        self.assertNotIn("reported_model_id", decode())
+        records[0]["init"]["model"] = choice
+        self.assertEqual(decode().get("reported_model_id"), choice)
+        records[-1]["result"]["conversation_id"] = "78963642-d092-43b1-8d96-45abc0494831"
+        self.assertNotIn("reported_model_id", decode())
+
+    def test_runtime_invalid_model_errors_are_not_confused_with_model_prose(self):
+        message = 'invalid model selection (--model "does-not-exist" --effort ""): model is not recognized'
+        error = json.dumps({"status": "ERROR", "error": message, "num_turns": 0}).encode("utf-8")
+        for stdout, stderr in ((error, b""), (b"", message.encode("utf-8"))):
+            result = agy.decode_stream_result(1, stdout, stderr, False, workspace=self.workspace)
+            self.assertEqual(result.reason, "MODEL_UNAVAILABLE")
+        result = agy.decode_result(0, json.dumps({"status": "SUCCESS", "response": message}).encode(), b"", False)
+        self.assertTrue(result.ok)
 
     def test_edit_profile_disallows_permissions_beyond_edit(self):
         edits = ("source/main.py", "docs/notes draft.md")
