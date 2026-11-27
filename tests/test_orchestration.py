@@ -51,9 +51,17 @@ class OrchestrationTests(unittest.TestCase):
         self.fixture = tempfile.TemporaryDirectory()
         self.addCleanup(self.fixture.cleanup)
         self.root = Path(self.fixture.name).resolve()
-        env = mock.patch.dict(os.environ, {'GIT_CEILING_DIRECTORIES': str(self.root.parent)})
-        env.start()
-        self.addCleanup(env.stop)
+        name = 'GIT_CEILING_DIRECTORIES'
+        previous = os.environ.get(name)
+
+        def restore_ceiling():
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+
+        os.environ[name] = str(self.root.parent)
+        self.addCleanup(restore_ceiling)
         self.ws = self.root / 'workspace'
         self.ws.mkdir()
 

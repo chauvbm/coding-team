@@ -1,5 +1,4 @@
-from contextlib import contextmanager
-from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -7,9 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
-import uuid
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,40 +136,78 @@ class IntegrationInstallTests(unittest.TestCase):
                 self.assertEqual(snapshot(user['agents_dir']), user_agents)
                 self.uninstall(name, 'user')
 
-    def test_codex_manifests_and_registry_share_one_canonical_state(self):
-        user = self.paths('codex')
-        project = self.paths('codex', 'project')
-        user_manifest = (user['skill_dir'] / ct_install.MANIFEST_NAME).resolve()
-        project_manifest = (project['skill_dir'] / ct_install.MANIFEST_NAME).resolve()
-        state = user['state_file'].resolve()
-        registry = state.parent / 'external-installations.json'
-
+    def test_codex_manifests_share_native_state_without_legacy_registry(self):
         self.install('codex', 'project')
-        self.assertFalse(state.exists())
+        self.assertFalse(self.paths('codex')['state_file'].exists())
         self.install('codex')
-        for manifest in (user_manifest, project_manifest):
-            with self.subTest(manifest=manifest):
-                data = json.loads(manifest.read_bytes())
-                self.assertEqual(data['schema_version'], 1)
-                self.assertEqual(data['external_abi'], 1)
-                self.assertEqual(data['state_path'], state.as_posix())
-                self.assertEqual(data['install_lock'], user['lock_file'].resolve().as_posix())
-        self.assertEqual(json.loads(registry.read_bytes()), {'schema_version': 1, 'installations': {
-            user_manifest.as_posix(): 'user', project_manifest.as_posix(): 'project',
-        }})
+        paths = self.paths('codex')
+        for scope in ('user', 'project'):
+            manifest = self.paths('codex', scope)['skill_dir'] / ct_install.MANIFEST_NAME
+            data = json.loads(manifest.read_bytes())
+            self.assertEqual(data['bridge_abi'], 1)
+            self.assertEqual(data['component'], 'leader')
+            self.assertEqual(data['state_path'], paths['state_file'].resolve().as_posix())
+            self.assertEqual(data['install_lock'], paths['lock_file'].resolve().as_posix())
+        self.assertFalse((paths['state_file'].parent / 'external-installations.json').exists())
 
-        legacy = json.loads(project_manifest.read_bytes())
-        for key in ('external_abi', 'state_path', 'install_lock'):
-            del legacy[key]
-        project_manifest.write_text(json.dumps(legacy), encoding='utf-8')
-        policy = state.read_bytes()
-        self.install('codex', 'project')
-        self.assertEqual(state.read_bytes(), policy)
-        self.assertEqual(json.loads(project_manifest.read_bytes())['external_abi'], 1)
-        self.uninstall('codex', 'project')
-        self.assertEqual(ct_install.load_external_installations(state), {user_manifest: 'user'})
-        self.uninstall('codex')
-        self.assertEqual(ct_install.load_external_installations(state), {})
+    def test_desktop_replaces_managed_cli_files_without_legacy_state(self):
+        for corrupt in (False, True):
+            with self.subTest(corrupt=corrupt):
+                self.fresh_home(str(corrupt))
+                old = b'legacy managed runtime bytes\n'
+                legacy_plan = self.plan(default='off')
+                legacy_plan.files = [('skill_dir', 'SKILL.md', b'legacy instructions\n'),
+                                     ('skill_dir', 'scripts/ct_external.py', old),
+                                     ('skill_dir', 'scripts/ct_winjob.py', old)]
+                ct_install.apply_plan(legacy_plan, dry_run=False)
+                paths = self.paths('codex')
+                skill = paths['skill_dir']
+                manifest_path = skill / ct_install.MANIFEST_NAME
+                manifest = json.loads(manifest_path.read_bytes())
+                clean = skill / 'scripts/ct_external.py'
+                edited = skill / 'scripts/ct_winjob.py'
+                edited.write_bytes(b'user modified legacy helper\n')
+                for key in ('bridge_abi', 'component'):
+                    manifest.pop(key, None)
+                manifest['external_abi'] = 1
+                manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+                self.assertFalse((skill / 'scripts/ct_bridge_store.py').exists())
+                unmanaged = skill / 'personal-helper.py'
+                unmanaged.write_bytes(b'personal bytes')
+                legacy_paths = [paths['state_file'].parent / 'external-installations.json',
+                                paths['state_file'].parent / 'external/v1/state.sqlite3']
+                if corrupt:
+                    for path in legacy_paths:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b'not readable legacy state')
+                before = snapshot(self.tmp)
+                ct_install.apply_plan(self.plan(), dry_run=True)
+                self.assertEqual(snapshot(self.tmp), before)
+                result = self.install('codex')
+                self.assertIn(clean.as_posix(), result['removed_stale'])
+                self.assertIn(edited.as_posix(), result['kept_modified_stale'])
+                self.assertFalse(clean.exists())
+                self.assertEqual(edited.read_bytes(), b'user modified legacy helper\n')
+                self.assertEqual(unmanaged.read_bytes(), b'personal bytes')
+                for path in legacy_paths:
+                    self.assertEqual(path.read_bytes() if path.exists() else None,
+                                     b'not readable legacy state' if corrupt else None)
+                self.assertFalse((self.project / '.coding-team/bridge').exists())
+
+    def test_managed_setup_repairs_epochs_without_changing_native_choices(self):
+        paths = self.paths('codex')
+        paths['state_file'].parent.mkdir(parents=True)
+        native = {'schema_version': 1, 'global_policy': 'OFF', 'chat_policies': {'chat': 'ON'},
+                  'updated_at': 'preserved'}
+        paths['state_file'].write_text(json.dumps(native), encoding='utf-8')
+        self.install('codex')
+        state = ct_policy.load_state(paths['state_file'])
+        self.assertEqual({key: state[key] for key in native}, native)
+        self.assertEqual(ct_policy.policy_stamp(paths['state_file'], 'chat', require_epochs=True).effective, 'ON')
+        state['policy_epoch_v1']['fingerprint'] = 'broken'
+        paths['state_file'].write_text(json.dumps(state), encoding='utf-8')
+        self.install('codex')
+        self.assertEqual(ct_policy.policy_stamp(paths['state_file'], 'chat', require_epochs=True).effective, 'ON')
 
     def test_codex_installation_cannot_mutate_under_a_different_state_binding(self):
         original = self.paths('codex')
@@ -190,28 +225,183 @@ class IntegrationInstallTests(unittest.TestCase):
         self.assertFalse(self.paths('codex')['state_file'].exists())
         self.assertEqual(ct_policy.load_state(original['state_file'])['global_policy'], 'OFF')
 
-    @unittest.skipUnless(os.name == 'nt', 'Windows Codex external maintenance')
-    def test_external_hook_for_mutation_runs_under_install_lock(self):
+    def test_desktop_worktree_registration_is_canonical_idempotent_and_fail_closed(self):
+        import ct_bridge_install
+        subprocess.run(['git', 'init', '-q', str(self.project)], check=True, capture_output=True)
+        child = self.project / 'child'
+        child.mkdir()
+        lock = self.paths('codex')['lock_file']
+        with ct_install.locked(lock):
+            ct_bridge_install.register_worktree(lock, child)
+            ct_bridge_install.register_worktree(lock, self.project)
+        index = lock.parent / 'bridge-worktrees.json'
+        content = json.loads(index.read_bytes())
+        self.assertEqual(content, {'schema_version': 1, 'worktrees': [self.project.resolve().as_posix()]})
+        before = index.read_bytes()
+        with ct_install.locked(lock):
+            with self.assertRaises(ValueError):
+                ct_bridge_install.register_worktree(lock, self.home)
+        self.assertEqual(index.read_bytes(), before)
+        content['worktrees'] = ['../relative-worktree']
+        index.write_text(json.dumps(content), encoding='utf-8')
+        with ct_install.locked(lock), self.assertRaises(ValueError):
+            ct_bridge_install.guard(lock)
+
+    def test_concurrent_desktop_registration_preserves_all_checkout_roots(self):
+        import ct_bridge_install
+        checkouts = [self.project, self.tmp / 'other checkout']
+        for checkout in checkouts:
+            subprocess.run(['git', 'init', '-q', str(checkout)], check=True, capture_output=True)
+        lock = self.paths('codex')['lock_file']
+
+        def register(checkout):
+            with ct_install.locked(lock):
+                ct_bridge_install.register_worktree(lock, checkout)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(register, checkouts * 3))
+        index = json.loads((lock.parent / 'bridge-worktrees.json').read_bytes())
+        self.assertEqual(index['worktrees'], sorted(path.resolve().as_posix() for path in checkouts))
+
+    def test_desktop_registration_retries_after_atomic_write_failure(self):
+        import ct_bridge_install
+        subprocess.run(['git', 'init', '-q', str(self.project)], check=True, capture_output=True)
+        lock = self.paths('codex')['lock_file']
+        index = lock.parent / 'bridge-worktrees.json'
+        with ct_install.locked(lock):
+            with mock.patch.object(ct_bridge_install, 'atomic_write', side_effect=OSError('fixture failure')):
+                with self.assertRaises(OSError):
+                    ct_bridge_install.register_worktree(lock, self.project)
+            self.assertFalse(index.exists())
+            ct_bridge_install.register_worktree(lock, self.project)
+            ct_bridge_install.register_worktree(lock, self.project)
+        self.assertEqual(json.loads(index.read_bytes())['worktrees'], [self.project.resolve().as_posix()])
+
+    def test_recover_does_not_replace_desktop_component_during_open_round(self):
+        import ct_bridge_install
+        from ct_bridge_files import AttemptKey, locate_workspace, publish_file
+        from ct_bridge_store import Store
+        subprocess.run(['git', 'init', '-q', str(self.project)], check=True, capture_output=True)
+        self.install('codex', default='off')
         paths = self.paths('codex')
+        lock = paths['lock_file']
+        with ct_install.locked(lock):
+            ct_bridge_install.register_worktree(lock, self.project)
+        store = Store(locate_workspace(self.project))
+        managed = paths['skill_dir'] / 'SKILL.md'
+        old = managed.read_bytes()
+        manifest = paths['skill_dir'] / ct_install.MANIFEST_NAME
+        old_manifest = manifest.read_bytes()
+        plan = self.plan()
+        plan.files = [(label, rel, payload + b'\nfixture upgrade\n' if rel == 'SKILL.md' else payload)
+                      for label, rel, payload in plan.files]
+        write = ct_install.atomic_write
+
+        class Interrupted(BaseException):
+            pass
+
+        def interrupt(path, payload):
+            write(path, payload)
+            if Path(path) == managed:
+                raise Interrupted
+
+        with mock.patch.object(ct_install, 'atomic_write', side_effect=interrupt):
+            with self.assertRaises(Interrupted):
+                ct_install.apply_plan(plan, dry_run=False)
+        self.assertNotEqual(managed.read_bytes(), old)
+        with store.write() as db:
+            db.execute("INSERT INTO rounds (id,leader_epoch,leader_platform,leader_chat,leader_manifest,opened_at) "
+                       "VALUES ('R-test',1,'codex','chat-test','fixture',1)")
+        publish_file(store.paths, AttemptKey('CT-history', 1), 'request', b'old request\n')
+        publish_file(store.paths, AttemptKey('CT-history', 1), 'result', b'old result\n')
+        before = snapshot(self.tmp)
+        with self.assertRaisesRegex(ValueError, 'DESKTOP_ROUND_OPEN'):
+            self.recover()
+        self.assertEqual(snapshot(self.tmp), before)
+        with store.write() as db:
+            db.execute("UPDATE rounds SET closed_at=2 WHERE id='R-test'")
+        history = snapshot(store.paths.data)
+        report = self.recover()
+        self.assertIn(managed.as_posix(), report['restored'])
+        self.assertEqual(managed.read_bytes(), old)
+        self.assertEqual(manifest.read_bytes(), old_manifest)
+        self.assertEqual(snapshot(store.paths.data), history)
+        # Reinstall may be a no-op while busy; actual mutation and removal must wait.
+        with store.write() as db:
+            db.execute("UPDATE rounds SET closed_at=NULL WHERE id='R-test'")
+        self.install('codex')
+        with self.assertRaisesRegex(ValueError, 'DESKTOP_ROUND_OPEN'):
+            ct_install.apply_plan(plan, dry_run=False)
+        with self.assertRaisesRegex(ValueError, 'DESKTOP_ROUND_OPEN'):
+            self.uninstall('codex')
+        with store.write() as db:
+            db.execute("UPDATE rounds SET closed_at=3 WHERE id='R-test'")
+        history = snapshot(store.paths.data)
+        self.uninstall('codex')
+        self.assertEqual(snapshot(store.paths.data), history)
+        self.assertTrue((lock.parent / 'bridge-worktrees.json').is_file())
+
+    def test_native_lock_is_held_through_staging_publication_and_recovery(self):
+        paths = self.paths('codex')
+        original_write = ct_install.atomic_write
         calls = []
 
-        @contextmanager
-        def maintenance(state, operation):
-            self.assertEqual(state, paths['state_file'].resolve())
-            with self.assertRaises(TimeoutError), ct_install.locked(paths['lock_file'], timeout=0):
-                self.fail('maintenance must run with the existing install lock held')
-            calls.append(operation)
-            yield
+        class Interrupted(BaseException):
+            pass
 
-        with mock.patch('ct_external.maintenance_locked', maintenance, create=True):
-            plan = self.plan()
-            ct_install.apply_plan(plan, dry_run=True)
-            self.assertEqual(calls, [])
-            self.install('codex')
-            self.install('codex')
-            ct_install.uninstall(self.cfg('codex'), scope='user', env=self.env, home=self.home, dry_run=True)
-            self.uninstall('codex')
-        self.assertEqual(calls, ['install', 'uninstall'])
+        def check_lock(path, data):
+            with self.assertRaises(TimeoutError), ct_install.locked(paths['state_file'], timeout=0):
+                self.fail('native writer raced the installer')
+            calls.append(Path(path))
+            original_write(path, data)
+            if Path(path) == paths['state_file'] and interrupt:
+                raise Interrupted
+
+        interrupt = True
+        with mock.patch.object(ct_install, 'atomic_write', side_effect=check_lock):
+            with self.assertRaises(Interrupted):
+                self.install('codex', default='off')
+            interrupt = False
+            self.recover()
+        self.assertTrue(calls)
+        self.assertFalse(paths['state_file'].exists())
+
+    def test_upgrade_journal_restores_managed_files(self):
+        self.install('codex', default='off', global_rules=True)
+        paths = self.paths('codex')
+        skill = paths['skill_dir']
+        legacy = skill / 'scripts/ct_external.py'
+        old = b'legacy managed bytes\n'
+        legacy.write_bytes(old)
+        manifest = skill / ct_install.MANIFEST_NAME
+        data = json.loads(manifest.read_bytes())
+        data['files']['skill_dir']['scripts/ct_external.py'] = hashlib.sha256(old).hexdigest()
+        manifest.write_text(json.dumps(data), encoding='utf-8')
+        old_manifest = manifest.read_bytes()
+        old_policy = paths['state_file'].read_bytes()
+        rules = paths['global_rules_file']
+        rules.write_bytes(b'user prefix\n' + rules.read_bytes() + b'user suffix\n')
+        old_rules = rules.read_bytes()
+        write = ct_install.atomic_write
+
+        class Interrupted(BaseException):
+            pass
+
+        def interrupt(path, payload):
+            if Path(path) == manifest:
+                raise Interrupted
+            write(path, payload)
+
+        with mock.patch.object(ct_install, 'atomic_write', side_effect=interrupt):
+            with self.assertRaises(Interrupted):
+                self.install('codex')
+        self.assertFalse(legacy.exists())
+        report = self.recover()
+        self.assertIn(legacy.as_posix(), report['restored'])
+        self.assertEqual(legacy.read_bytes(), old)
+        self.assertEqual(manifest.read_bytes(), old_manifest)
+        self.assertEqual(paths['state_file'].read_bytes(), old_policy)
+        self.assertEqual(rules.read_bytes(), old_rules)
 
     def test_recover_restores_default_if_interrupted_after_policy_publication(self):
         paths = self.paths('codex')
@@ -242,281 +432,6 @@ class IntegrationInstallTests(unittest.TestCase):
         self.assertEqual(ct_policy.load_state(state_path)['global_policy'], 'ON')
         self.assertIn(state_path.as_posix(), self.recover()['restored'])
         self.assertEqual(state_path.read_bytes(), original)
-
-    @unittest.skipUnless(os.name == 'nt', 'Windows Codex external maintenance')
-    def test_legacy_recovery_keeps_journal_and_backups_until_writer_stops(self):
-        paths = self.paths('codex')
-        manifest = paths['skill_dir'] / ct_install.MANIFEST_NAME
-        registry = paths['state_file'].parent / 'external-installations.json'
-        self.install('codex', default='off')
-        legacy = json.loads(manifest.read_bytes())
-        for key in ('external_abi', 'state_path', 'install_lock'):
-            del legacy[key]
-        manifest.write_text(json.dumps(legacy), encoding='utf-8')
-        registry.unlink()
-        original_state = paths['state_file'].read_bytes()
-        original_manifest = manifest.read_bytes()
-        original_write = ct_install.atomic_write
-
-        class Interrupted(BaseException):
-            pass
-
-        def interrupt(path, data):
-            original_write(path, data)
-            if Path(path) == registry:
-                raise Interrupted
-
-        with mock.patch.object(ct_install, 'atomic_write', side_effect=interrupt):
-            with self.assertRaises(Interrupted):
-                self.install('codex', default='on')
-        journal = json.loads(paths['journal_file'].read_bytes())
-        backup_dir = Path(journal['backup_dir'])
-        self.assertTrue(backup_dir.is_dir())
-        before = snapshot(self.tmp)
-        backups = snapshot(backup_dir)
-
-        @contextmanager
-        def maintenance(state, operation):
-            self.assertEqual((state, operation), (paths['state_file'].resolve(), 'recover'))
-            if writer_active:
-                raise RuntimeError('stop proof unavailable')
-            yield
-
-        with mock.patch('ct_external.maintenance_locked', maintenance, create=True):
-            writer_active = True
-            with self.assertRaisesRegex(RuntimeError, 'stop proof unavailable'):
-                self.recover()
-            self.assertEqual(snapshot(self.tmp), before)
-            writer_active = False
-            recovered = self.recover()
-
-        self.assertTrue(recovered['journal_removed'])
-        self.assertFalse(registry.exists())
-        self.assertEqual(manifest.read_bytes(), original_manifest)
-        self.assertEqual(paths['state_file'].read_bytes(), original_state)
-        self.assertEqual(snapshot(backup_dir), backups)
-
-
-@unittest.skipUnless(os.name == 'nt', 'Windows Codex packaged runner')
-class InstalledPackageMaintenanceTests(unittest.TestCase):
-    def setUp(self):
-        from tests.fixtures.external.make_fake_bundle import make_fake_bundle
-
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
-        bundle = self.root / 'bundle'
-        self.cli, self.env = make_fake_bundle(bundle)
-        self.source_cli = bundle / 'extracted/coding-team/scripts/coding_team.py'
-        self.state_dir = Path(self.env['CODEX_HOME']) / 'coding-team'
-        self.workspace = self.root / 'workspace'
-        self.other_project = self.root / 'other-project'
-        for project in (self.workspace, self.other_project):
-            project.mkdir()
-            self.git(project, 'init', '-q')
-            (project / 'input.txt').write_text('selected fixture\n', encoding='utf-8')
-            self.git(project, 'add', 'input.txt')
-            self.git(project, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid',
-                     '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'base')
-
-    def git(self, cwd, *args):
-        run = subprocess.run(['git', *args], cwd=cwd, env=self.env, capture_output=True, text=True, timeout=30)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        return run.stdout.strip()
-
-    def run_cli(self, *args, source=False, cli=None, cwd=None, stdin=None):
-        script = self.source_cli if source else cli or self.cli
-        result = subprocess.run([sys.executable, str(script), *map(str, args), '--platform', 'codex'],
-                                cwd=cwd or self.workspace, env=self.env, input=stdin,
-                                capture_output=True, text=True, encoding='utf-8', timeout=55)
-        try:
-            return result.returncode, json.loads(result.stdout)
-        except ValueError:
-            self.fail(f'expected one JSON object, got {result.stdout!r} {result.stderr!r}')
-
-    def control(self, verb, **kwargs):
-        return self.run_cli('command', f'/coding-team antigravity {verb}', **kwargs)
-
-    def attempt(self, operation, task, attempt=1, **kwargs):
-        args = ('--request-stdin',) if operation == 'reserve' else ()
-        code, report = self.run_cli('external', operation, '--workspace', self.workspace,
-                                    '--task-id', task, '--attempt', attempt, *args, **kwargs)
-        self.assertEqual(code, 0, report)
-        return report
-
-    def reserve_selected(self, task, request):
-        options = self.attempt('discover', task)
-        self.assertEqual(options['state'], 'MODEL_OPTIONS', options)
-        payload = dict(request, catalog_id=options['catalog_id'], model_id='gemini-fixture-low')
-        return self.attempt('reserve', task, stdin=json.dumps(payload))
-
-    def make_ready(self):
-        code, report = self.control('check')
-        self.assertEqual(code, 0, report)
-        deadline = time.monotonic() + 40
-        while time.monotonic() < deadline:
-            status = self.attempt('status', report['task_id'], report['attempt_no'])
-            if status['state'] in ('COMPLETED', 'FAILED', 'CANCELED', 'TIMED_OUT', 'RECONCILE_REQUIRED'):
-                self.assertEqual(status['state'], 'COMPLETED', status)
-                break
-            time.sleep(0.1)
-        else:
-            self.fail('qualification did not finish')
-        code, status = self.control('status')
-        self.assertEqual((code, status['state']), (0, 'READY'), status)
-
-    def start_blocked_worker(self, task, operation):
-        barrier = self.root / (task + '-release')
-        marker = self.root / (task + '-started')
-        prompt = json.dumps({'barrier': str(barrier), 'spawn_marker': str(marker), 'barrier_timeout': 30})
-        request = {'kind': 'READ', 'prompt': prompt,
-                   'base': self.git(self.workspace, 'rev-parse', 'HEAD'),
-                   'file_choices': {'input.txt': 'GIT'}, 'edit_paths': []}
-        self.reserve_selected(task, request)
-        ack = self.attempt('start', task)
-        self.assertTrue(ack['acknowledged'], ack)
-        try:
-            deadline = time.monotonic() + 10
-            while not marker.exists() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            if not marker.exists():
-                self.fail(f"detached fixture did not start: {self.attempt('status', task)!r}")
-            operation()
-            self.assertEqual(self.attempt('status', task)['state'], 'CANCELED')
-        finally:
-            barrier.touch()
-        self.assertEqual(self.control('status')[1]['reason'], 'CHECK_REQUIRED')
-
-    def test_packaged_upgrade_and_recover_stop_active_worker_and_invalidate_readiness(self):
-        code, status = self.control('status')
-        self.assertEqual((code, status['state']), (0, 'OFF'), status)
-        before = snapshot(self.state_dir)
-        code, doctor = self.run_cli('doctor')
-        self.assertIn(code, (0, 1), doctor)
-        self.assertEqual(doctor['antigravity_cli']['readiness'], 'OFF', doctor)
-        code, preview = self.run_cli('install', '--dry-run', source=True)
-        self.assertEqual(code, 0, preview)
-        self.assertTrue(preview['dry_run'], preview)
-        self.assertEqual(snapshot(self.state_dir), before)
-        self.assertEqual(self.control('on')[0], 0)
-        self.make_ready()
-
-        # An otherwise identical reinstall must preserve qualification.
-        code, result = self.run_cli('install', source=True)
-        self.assertEqual(code, 0, result)
-        self.assertEqual(self.control('status')[1]['state'], 'READY')
-
-        def upgrade():
-            source = self.source_cli.with_name('ct_external.py')
-            source.write_bytes(source.read_bytes() + b'\n# packaged upgrade fixture\n')
-            code, result = self.run_cli('install', source=True)
-            self.assertEqual(code, 0, result)
-            self.assertEqual(self.cli.with_name(source.name).read_bytes(), source.read_bytes())
-
-        self.start_blocked_worker('upgrade-active', upgrade)
-        self.make_ready()
-
-        def recover():
-            # Reproduce the journal left by a legacy installer after writing a reference.
-            target = self.cli.parents[1] / 'references/control-policy.md'
-            original = target.read_bytes()
-            changed = original + b'\ninterrupted transaction\n'
-            backup = self.state_dir / 'backups/recover-fixture/reference.md'
-            backup.parent.mkdir(parents=True)
-            backup.write_bytes(original)
-            target.write_bytes(changed)
-            journal = self.state_dir / 'install-journal.json'
-            journal.write_text(json.dumps({'schema_version': 1, 'operation': 'install', 'platform': 'codex',
-                                           'scope': 'user', 'created_dirs': [], 'backup_dir': backup.parent.as_posix(),
-                                           'targets': [{'path': target.as_posix(), 'existed': True,
-                                                        'backup': backup.as_posix(),
-                                                        'backup_sha256': hashlib.sha256(original).hexdigest(),
-                                                        'new_sha256': hashlib.sha256(changed).hexdigest()}]}),
-                               encoding='utf-8')
-            code, result = self.run_cli('install', '--recover', source=True)
-            self.assertEqual(code, 0, result)
-            self.assertTrue(result['journal_removed'], result)
-            self.assertEqual(target.read_bytes(), original)
-            self.assertEqual(backup.read_bytes(), original)
-
-        self.start_blocked_worker('recover-active', recover)
-
-    def test_managed_recover_can_close_lost_attempt_after_worktree_removal(self):
-        import ct_storage
-        import ct_winjob
-        from ct_external_store import AttemptKey, Owner, Store
-
-        self.assertEqual(self.control('on')[0], 0)
-        self.make_ready()
-        key = AttemptKey('lost-worktree', 1)
-        request = {'kind': 'READ', 'prompt': 'read the fixture',
-                   'base': self.git(self.workspace, 'rev-parse', 'HEAD'),
-                   'file_choices': {'input.txt': 'GIT'}, 'edit_paths': []}
-        self.reserve_selected(key.task_id, request)
-        state_path = self.state_dir / 'state.json'
-        store = Store(self.state_dir / 'external' / 'v1')
-        owner = Owner('codex', self.env['CODEX_THREAD_ID'], str(self.workspace.resolve()), 'antigravity')
-        previous = replace(ct_winjob.current_owner_process(), boot_id=str(uuid.uuid4()))
-        job_name = ct_winjob.new_job_name()
-        former_identity = ct_winjob.ProcessIdentity(job_name, previous.pid, previous.creation_time,
-                                                     previous.session_id, previous.boot_id)
-        # Seed the persisted evidence of a lost supervisor on an earlier boot.
-        # No provider or live job is associated with this synthetic identity.
-        with ct_storage.locked(self.state_dir / 'install.lock'), ct_storage.locked(state_path):
-            stamp = ct_policy.policy_stamp(state_path, owner.chat_id, require_epochs=True)
-            store.claim_start(key, owner, stamp)
-            claim = store.run_snapshot(key, owner=owner).runner_claim
-            store.claim_runner(key, claim, stamp, previous)
-            store.admit_launch(key, claim, stamp, {'job_name': job_name})
-            store.record_process(key, claim, former_identity)
-            store.resume_process(key, claim, stamp, lambda: None)
-            self.assertEqual(store.begin_maintenance().state, 'STOPPING')
-
-        self.workspace.rename(self.root / 'removed-worktree')
-        code, rejected = self.run_cli('external', 'reconcile', '--target', 'process',
-                                      '--workspace', self.workspace, '--task-id', key.task_id,
-                                      '--attempt', 1, cwd=self.other_project)
-        self.assertEqual((code, rejected['reason']), (2, 'INVALID_WORKTREE'), rejected)
-        code, recovered = self.run_cli('install', '--recover', source=True, cwd=self.other_project)
-        self.assertEqual(code, 0, recovered)
-        self.assertFalse(store.maintenance_pending())
-        self.assertIsNone(store.active_attempt())
-        outcome = store.run_snapshot(key, runner_claim=claim)
-        self.assertEqual(outcome.view.state, 'CANCELED')
-        self.assertEqual(outcome.stop_proof['basis'], 'BOOT_CHANGED')
-
-    def test_registered_legacy_project_blocks_admission_from_other_checkout(self):
-        args = ('install', '--scope', 'project', '--project-dir', self.other_project)
-        code, installed = self.run_cli(*args, source=True)
-        self.assertEqual(code, 0, installed)
-        manifest = Path(installed['manifest'])
-        document = json.loads(manifest.read_bytes())
-        for key in ('external_abi', 'state_path', 'install_lock'):
-            del document[key]
-        manifest.write_text(json.dumps(document), encoding='utf-8')
-        code, blocked = self.control('on')
-        self.assertNotEqual(code, 0, blocked)
-        self.assertEqual(blocked['reason'], 'INSTALLATION_INCOMPATIBLE')
-
-        code, installed = self.run_cli(*args, source=True)
-        self.assertEqual(code, 0, installed)
-        self.assertEqual(self.control('on')[0], 0)
-        self.make_ready()
-
-        project_cli = manifest.parent / 'scripts/coding_team.py'
-        code, result = self.control('on', cli=project_cli, cwd=self.other_project)
-        self.assertEqual(code, 0, result)
-
-        def try_other_checkout():
-            code, busy = self.control('check', cli=project_cli, cwd=self.other_project)
-            self.assertNotEqual(code, 0, busy)
-            self.assertEqual(busy['reason'], 'BUSY')
-            code, upgraded = self.run_cli('install', '--default', 'off', source=True)
-            self.assertEqual(code, 0, upgraded)
-            code, upgraded = self.run_cli('install', '--default', 'on', source=True)
-            self.assertEqual(code, 0, upgraded)
-
-        self.start_blocked_worker('shared-slot', try_other_checkout)
 
 
 if __name__ == '__main__':

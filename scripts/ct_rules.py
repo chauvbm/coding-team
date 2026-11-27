@@ -37,14 +37,14 @@ def render_rules_block(*, platform: str, python: str, cli: Path, state: Path, sk
     adaptive = (Path(skill_dir) / 'references/adaptive-planning.md').as_posix()
     external = ''
     if platform == 'codex' and os.name == 'nt':
-        external_ref = (Path(skill_dir) / 'references/antigravity-cli.md').as_posix()
+        external_ref = (Path(skill_dir) / 'references/antigravity-desktop.md').as_posix()
         external = (
-            'Optional Antigravity CLI worker on Windows. The default is native-only. '
-            'Use the same installed command entry for direct user messages '
-            'of the form `/coding-team antigravity on|off|status|check` or its `/team-coding antigravity` alias. '
-            'The external opt-in belongs to the current chat and Git worktree. '
-            'Check both policies and the setup before dispatch. '
-            f'See `{external_ref}` for setup and the native representative.\n\n'
+            'Optional Antigravity Desktop worker on Windows. The default is native-only. '
+            'Use the same installed command entry from the worktree for direct user messages '
+            '`/coding-team leader on|off|status`, `/coding-team antigravity on|off|pair|status|check` '
+            'and `/coding-team agy auto on|off`, including the `/team-coding` alias. '
+            'Use the runtime chat ID for bridge controls. Check the current Leader, policy, pairing and readiness '
+            f'before dispatch. See `{external_ref}` for setup and the native representative.\n\n'
         )
     return f'''{START}
 ## Coding-team policy and routing

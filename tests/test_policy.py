@@ -88,6 +88,20 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(policy.policy_stamp(self.state, 'explicit', require_epochs=True),
                              policy.PolicyStamp('ON', 1, None))
 
+    def test_managed_install_stages_policy_epochs_without_overriding_preferences(self):
+        policy.initialize_state(self.state, 'off')
+        policy.apply_command(self.state, '/coding-team on', 'explicit')
+        before = self.state.read_bytes()
+        with ct_storage.locked(self.state):
+            payload = policy.prepare_initialization(self.state, repair_epochs=True)
+            self.assertEqual(self.state.read_bytes(), before)
+            ct_storage.atomic_write(self.state, payload)
+            self.assertEqual(policy.policy_stamp(self.state, 'explicit', require_epochs=True),
+                             policy.PolicyStamp('ON', 0, None))
+            self.assertEqual(policy.policy_stamp(self.state, 'other', require_epochs=True),
+                             policy.PolicyStamp('OFF', 0, 0))
+            self.assertIsNone(policy.prepare_initialization(self.state, repair_epochs=True))
+
     def test_chat_precedence_and_reset(self):
         policy.initialize_state(self.state)
         policy.apply_command(self.state, '/coding-team off', 'a')

@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TEXT = {'.py', '.md', '.json', '.yaml', '.yml', '.txt'}
 PLATFORM_NAME = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 EXCLUDED = {'__pycache__', '.git', 'backups', 'tests', 'benchmarks', 'evaluations', 'graphify-out', 'vendor'}
+RETIRED = {'scripts/ct_antigravity.py', 'scripts/ct_winjob.py', 'scripts/ct_external.py',
+           'scripts/ct_external_store.py', 'scripts/ct_external_workspace.py',
+           'references/antigravity-cli.md'}
 
 
 def reject_link(path):
@@ -55,10 +58,19 @@ def resources(source_root, platform=None):
                 rel = entry.relative_to(root)
                 if keep_platform is not None and rel.parts[0] == 'platforms' and rel != keep_platform:
                     continue
-                if not EXCLUDED.intersection(rel.parts) and entry.suffix not in ('.pyc', '.pyo'):
+                if (not EXCLUDED.intersection(rel.parts) and entry.suffix not in ('.pyc', '.pyo')
+                        and rel.as_posix() not in RETIRED):
                     selected.append(entry)
             else:
                 raise ValueError('unsupported runtime resource: ' + entry.name)
+    if platform in (None, 'antigravity'):
+        worker = root / 'workers' / 'antigravity' / 'SKILL.md'
+        for path in (worker.parent.parent, worker.parent, worker):
+            reject_link(path)
+        if worker.exists():
+            if not worker.is_file():
+                raise ValueError('incorrect worker runtime resource type')
+            selected.append(worker)
     return root, sorted(selected)
 
 

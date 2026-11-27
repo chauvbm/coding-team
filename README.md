@@ -51,28 +51,18 @@ python ~/src/coding-team/scripts/coding_team.py install --platform codex --defau
 
 On Codex the commands may also be written with the `$coding-team` prefix. The installed `agents/openai.yaml` keeps implicit invocation enabled; leave it that way so the ON/OFF controls stay reachable while coding-team is OFF. Codex role files carry no model (`static_agent_model: omit`): the Leader passes the tier's model at spawn, because a model in the agent TOML would win over it.
 
-#### Antigravity CLI workers on Windows
+#### Antigravity Desktop worker on Windows
 
-The Windows integration dispatches bounded read or edit requests to Google's installed `agy` CLI in a separate copy of the selected project files. It uses Antigravity's native sign-in and a per-session permission profile. It preserves the user's settings. Upgrade all known user and project copies sharing the Codex policy file before enabling workers. For a project copy in another checkout, use `install --platform codex --scope project --project-dir DIR`.
+Install the separate worker skill into Antigravity Desktop. Open the same Git worktree in both apps. Antigravity uses the account, model and permissions selected in its own app.
 
-The worker switch starts OFF for each Codex chat and worktree. It also requires the regular coding-team policy to be ON for the chat. Run `doctor --platform codex` from the installed copy to inspect local availability and readiness. Doctor and install previews only inspect local state.
+```sh
+python ~/src/coding-team/scripts/coding_team.py install --platform antigravity --desktop-worker --dry-run
+python ~/src/coding-team/scripts/coding_team.py install --platform antigravity --desktop-worker
+```
 
-The release includes the signed `agy` 1.5.9 bootstrap profile verified on Windows. The worker reuses the CLI's saved sign-in. Run `check` after enabling the worker to verify the local installation. A verified binary without a matching launch profile reports `CUSTOMIZATIONS_BLOCKED`. [Qualification requirements](references/antigravity-cli.md#qualify-a-signed-cli-build)
+In the Codex chat, send `/coding-team leader on`, `/coding-team antigravity on` and `/coding-team antigravity pair`. Send the pairing prompt in the Antigravity chat you want to keep using. Manual delivery is the default. To enable automatic delivery, send `/coding-team agy auto on` in Codex and `/coding-team-worker listen` in the paired Antigravity chat. The worker receives later corrections in that same chat.
 
-For each assignment, the Codex Leader reads the active Antigravity account's model list and quota. It chooses an exact model and reasoning variant for the task. When the available model groups are out of quota, Codex assigns the work to a native subagent. [Assignment procedure](references/antigravity-cli.md#assign-and-collect)
-
-| Send in the Codex chat | Effect |
-| --- | --- |
-| `/coding-team antigravity status` | Show opt-in, readiness and the chat's attempts. |
-| `/coding-team antigravity on` | Enable this chat and worktree to use the worker after qualification. |
-| `/coding-team antigravity check` | Run qualification with synthetic project files and model calls. Wait for `READY` before delegating. |
-| `/coding-team antigravity off` | Disable this chat and worktree and request cancellation of its outstanding attempt. |
-
-User and project copies that share the Codex policy file share one runner slot. A managed upgrade, recovery or uninstall blocks new attempts and waits for an active process tree to stop before changing the bundle. If it cannot confirm the stop, keep the bundle, state, journal and backups, then retry the same operation after reconciliation. Run `install --platform codex --recover` for an interrupted transaction, adding the original `--scope project --project-dir DIR` for project scope. A successful runtime change requires a fresh check.
-
-To roll back, turn the worker OFF, wait for the current attempt to stop or reconcile it, and use managed uninstall and install for each affected copy. The `pre-antigravity-cli-20261115` tag identifies the pre-integration runtime. Keep the policy file and local SQLite and result artifacts if you need their history.
-
-To move an existing install to a different `CODEX_HOME`, uninstall it using its current `CODEX_HOME` before installing with the new location. [Antigravity CLI reference](references/antigravity-cli.md)
+Each worktree has one inter-app Leader. Run `/coding-team leader status` to see which chat holds the role. Run `/coding-team leader on` in another Codex chat to transfer it after the current coordination round closes. The [Desktop worker guide](references/antigravity-desktop.md) covers controls, readiness, result collection and recovery.
 
 ### Antigravity
 
@@ -86,7 +76,7 @@ python ~/src/coding-team/scripts/coding_team.py install --platform antigravity -
 
 ### Runtime-only package
 
-Instead of installing from a full clone, a maintainer can build a smaller ZIP with `python scripts/build_runtime_package.py [--platform P] --output ../coding-team.zip`. It contains `LICENSE`, `SKILL.md`, `agents`, `platforms` (only `platforms/P.json` with `--platform`), `references` and `scripts`, plus a hash manifest, under `coding-team/`. Extract it into a staging directory and run the same `install` commands with the extracted `coding-team/scripts/coding_team.py`. A package built with `--platform P` can install only platform P; installing another platform from it fails because `platforms/<other>.json` is missing. See [runtime packaging](CONTRIBUTING.md#runtime-only-installation-package).
+Instead of installing from a full clone, a maintainer can build a smaller ZIP with `python scripts/build_runtime_package.py [--platform P] --output ../coding-team.zip`. It contains `LICENSE`, `SKILL.md`, `agents`, `platforms`, `references` and `scripts`, plus a hash manifest, under `coding-team/`. The full package and the Antigravity package also include the separate Desktop worker skill. Extract the ZIP and run `install` from the extracted `coding-team/scripts/coding_team.py`. Use the full package or the corresponding platform package to install each app's component. See [runtime packaging](CONTRIBUTING.md#runtime-only-installation-package).
 
 ### Conflicts, recovery and uninstall
 
@@ -205,6 +195,7 @@ This table is filled only from a published smoke record, `evaluations/<date>-pla
 | [debate-governance.md](references/debate-governance.md) | Issues, evidence, counters, termination and approvals |
 | [quality-safety.md](references/quality-safety.md) | Verification, recovery and accurate reporting |
 | [control-policy.md](references/control-policy.md) | Commands, state, chat identity and the CLI |
+| [antigravity-desktop.md](references/antigravity-desktop.md) | Pairing, handoff and the native representative |
 | [task-ledger.md](references/task-ledger.md) | Optional durable task records and readiness |
 | [governance-defaults.json](references/governance-defaults.json) | Single source of numeric defaults |
 | [roles.json](agents/roles/roles.json) | Role capabilities; contracts in `agents/roles/ct-*.md` |

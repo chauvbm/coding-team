@@ -42,7 +42,7 @@ Controls never reset ledgers, extend budgets, approve plans or resume STOP_HOLD.
 
 ## External workers
 
-The Windows Codex installation supports a separate, default-OFF [Antigravity CLI opt-in](antigravity-cli.md). Its four commands use the same installed `command` entry. They keep native policy, budgets and reviews separate. When native policy changes during an external attempt, its supervisor observes the change and stops the affected attempt under its recorded policy generation.
+Codex on Windows supports a separate, default-OFF [Antigravity Desktop opt-in](antigravity-desktop.md). The Leader, Antigravity and AUTO controls use the same installed `command` entry from the worktree. They take chat identity from the runtime. Native OFF blocks new starts. Already-started work keeps its outcome and write ownership until reconciled. The external role and the native policy each have their own controls.
 
 ## `scripts/coding_team.py`
 

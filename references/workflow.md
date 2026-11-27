@@ -26,7 +26,7 @@ A role is not an obligatory additional agent for every coding task. A Developer'
 
 ## Work queue and integration
 
-For a [managed external attempt](antigravity-cli.md), Leader prepares and reserves the exact file scope, opens the native representative, then starts the supervisor. Leader can continue native coordination after the acknowledgment. When a proposed edit arrives, verify and test the candidate before applying it through the tracked disposition. Keep a blocked attempt's scope until stop proof and apply reconciliation permit release.
+For an [Antigravity Desktop attempt](antigravity-desktop.md), Leader opens a coordination round, records the scope and baseline, publishes the request and appoints a native representative. The worker shares the worktree with Leader. Verify diff and tests before accepting edits. Keep the affected writing scope through unresolved results and keep the round open through review. Send a correction in the same paired chat as a new attempt of the same task.
 
 For durable accounting across handoffs or compaction, see the [optional task ledger](task-ledger.md). Check its plan gate before implementation and its delivery readiness after independent integrated QA; a successful state write alone grants no approval. For code delivery, reconcile declared files with actual staged, unstaged, deleted and untracked changes before final verification (or compare the saved baseline without Git). Empty file coverage verifies no project files, even when a non-file task can pass.
 

@@ -147,8 +147,12 @@ def repair_policy_epochs(path: Path) -> None:
 
 
 def _write_initial_epochs(path, state):
-    state[EPOCH_FIELD] = {'global': 0, 'chats': {}, 'fingerprint': _policy_fingerprint(state)}
+    _set_initial_epochs(state)
     save_state(path, state)
+
+
+def _set_initial_epochs(state):
+    state[EPOCH_FIELD] = {'global': 0, 'chats': {}, 'fingerprint': _policy_fingerprint(state)}
 
 
 def _native_epochs(state):
@@ -201,9 +205,17 @@ def _initialization(path, default):
     return state, False, changed
 
 
-def prepare_initialization(path, default=None):
+def prepare_initialization(path, default=None, *, repair_epochs=False):
     """Stage exact initializer bytes under the caller's native lock, or None for a no-op."""
     state, _, changed = _initialization(path, _normalize_default(default))
+    if repair_epochs:
+        try:
+            has_epochs = _epoch_metadata(state, require=True) is not None
+        except PolicyWriterIncompatible:
+            has_epochs = False
+        if not has_epochs:
+            _set_initial_epochs(state)
+            changed = True
     return _state_bytes(state) if changed else None
 
 

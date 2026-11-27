@@ -53,7 +53,7 @@ Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `
 
 ## Roles and delegation
 
-If this installation offers an [external worker](references/control-policy.md#external-workers), use it only when the user has opted in for this chat and worktree and the current policy and setup permit dispatch. Leader keeps control and a native representative can collect the result. Read the platform-specific procedure before asking the worker to act.
+If this installation offers an [external Desktop worker](references/control-policy.md#external-workers), handle its direct user controls with the installed `command` entry from the worktree. Check active Leader, native policy, opt-in, pairing and delivery readiness before assigning work. Open a coordination round before dispatch, and keep it open while reviewing a worker result. Follow the platform guide for the native representative, repeated corrections and recovery.
 
 | Role | Purpose | Ledger role |
 | --- | --- | --- |
