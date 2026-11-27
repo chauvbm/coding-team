@@ -119,6 +119,136 @@ class BridgeFileTests(unittest.TestCase):
                 destination.unlink()
         self.assertEqual(original.read_bytes(), b'outside')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows shared-delete handles')
+    def test_disappearing_journal_during_windows_handle_check(self):
+        from unittest.mock import patch
+
+        files.verify_layout(self.paths, create=True)
+        journal = self.paths.data / 'bridge.sqlite3-journal'
+        real_check = files._win_check
+        real_validate_tree = files._validate_tree
+
+        def unlink_before_name_check(handle, path, **options):
+            if path == journal:
+                journal.unlink()
+                raise files.BridgeError('PATH_COLLISION')
+            return real_check(handle, path, **options)
+
+        def create_journal_after_scan(paths, guard):
+            real_validate_tree(paths, guard)
+            journal.write_bytes(b'fixture journal')
+
+        with patch.object(files, '_win_check', side_effect=unlink_before_name_check):
+            journal.write_bytes(b'fixture journal')
+            files.verify_layout(self.paths, create=False)
+            self.assertFalse(journal.exists())
+
+            with patch.object(files, '_validate_tree', side_effect=create_journal_after_scan):
+                files.verify_layout(self.paths, create=False)
+            self.assertFalse(journal.exists())
+
+            journal.write_bytes(b'fixture journal')
+            with files.database_guard(self.paths) as present:
+                self.assertFalse(present)
+            self.assertFalse(journal.exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows shared-delete handles')
+    def test_journal_unlinked_before_windows_handle_metadata_read(self):
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        files.verify_layout(self.paths, create=True)
+        journal = self.paths.data / 'bridge.sqlite3-journal'
+        journal.write_bytes(b'fixture journal')
+        real_open = files._win_open
+        real_validate_tree = files._validate_tree
+
+        @contextmanager
+        def unlink_after_open(path, **options):
+            with real_open(path, **options) as handle:
+                if path == journal:
+                    journal.unlink()
+                yield handle
+
+        def create_journal_after_scan(paths, guard):
+            real_validate_tree(paths, guard)
+            journal.write_bytes(b'fixture journal')
+
+        with patch.object(files, '_win_open', side_effect=unlink_after_open):
+            files.verify_layout(self.paths, create=False)
+            self.assertFalse(journal.exists())
+
+            with patch.object(files, '_validate_tree', side_effect=create_journal_after_scan):
+                files.verify_layout(self.paths, create=False)
+            self.assertFalse(journal.exists())
+
+            journal.write_bytes(b'fixture journal')
+            with files.database_guard(self.paths) as present:
+                self.assertFalse(present)
+        self.assertFalse(journal.exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows handle link count')
+    def test_zero_link_handle_still_rejects_an_existing_path_or_main_database(self):
+        from contextlib import contextmanager
+        import ctypes
+        from unittest.mock import patch
+
+        files.verify_layout(self.paths, create=True)
+        journal = self.paths.data / 'bridge.sqlite3-journal'
+        real_open = files._win_open
+        real_info = files._Info
+
+        def zero_link_info(handle, out):
+            result = real_info(handle, out)
+            if result:
+                ctypes.cast(out, ctypes.POINTER(files._FileInfo)).contents.links = 0
+            return result
+
+        for path, unlink in ((journal, False), (self.paths.db, True)):
+            with self.subTest(file=path.name):
+                path.write_bytes(b'fixture file')
+
+                @contextmanager
+                def report_zero_links(target, **options):
+                    with real_open(target, **options) as handle:
+                        if target == path:
+                            if unlink:
+                                path.unlink()
+                            with patch.object(files, '_Info', side_effect=zero_link_info):
+                                yield handle
+                        else:
+                            yield handle
+
+                with patch.object(files, '_win_open', side_effect=report_zero_links):
+                    with self.assertRaisesRegex(files.BridgeError, 'UNSAFE_FILE_TYPE'):
+                        with files.database_guard(self.paths):
+                            self.fail('accepted an invalid database file')
+                if not unlink:
+                    self.assertEqual(path.read_bytes(), b'fixture file')
+                    path.unlink()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows handle path validation')
+    def test_existing_journal_still_rejects_a_windows_handle_path_collision(self):
+        from unittest.mock import patch
+
+        files.verify_layout(self.paths, create=True)
+        journal = self.paths.data / 'bridge.sqlite3-journal'
+        journal.write_bytes(b'fixture journal')
+        real_check = files._win_check
+
+        def reject_mismatched_journal(handle, path, **options):
+            if path == journal:
+                raise files.BridgeError('PATH_COLLISION')
+            return real_check(handle, path, **options)
+
+        with patch.object(files, '_win_check', side_effect=reject_mismatched_journal):
+            with self.assertRaisesRegex(files.BridgeError, 'PATH_COLLISION'):
+                files.verify_layout(self.paths, create=False)
+            with self.assertRaisesRegex(files.BridgeError, 'PATH_COLLISION'):
+                with files.database_guard(self.paths):
+                    self.fail('accepted an existing sidecar with a mismatched path')
+        self.assertEqual(journal.read_bytes(), b'fixture journal')
+
     def test_plain_file_rejects_directory_and_allows_absence(self):
         self.assertFalse(files.check_plain_file(self.root / 'absent', self.root))
         self.assertTrue(files.check_plain_file(self.root / 'source.txt', self.root))

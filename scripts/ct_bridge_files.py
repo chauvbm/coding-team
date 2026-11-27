@@ -28,6 +28,7 @@ _SHORT = re.compile(r'~[0-9]+(?:\.|$)')
 _ATTEMPT = re.compile(r'attempt-([1-9][0-9]{0,9})\Z')
 _TEMP = re.compile(r'\.(?:request\.md|result\.md|gitignore)\.[0-9a-f]{32}\.tmp\Z')
 _INBOX = re.compile(r'[0-9a-f]{32}\.json\Z')
+_DB_SIDECARS = ('bridge.sqlite3-journal', 'bridge.sqlite3-wal', 'bridge.sqlite3-shm')
 
 
 class BridgeError(ValueError):
@@ -208,7 +209,7 @@ class _Guard:
         self.directories[path] = descriptor
         return descriptor
 
-    def plain(self, path):
+    def plain(self, path, *, sqlite_sidecar=False):
         try:
             descriptor = self.directory(path.parent)
             if not self._case(path):
@@ -216,8 +217,16 @@ class _Guard:
             info = path.lstat() if os.name == 'nt' else os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
             _plain(info)
             if os.name == 'nt':
-                with _win_open(path, attributes_only=True) as handle:
-                    _win_check(handle, path)
+                try:
+                    with _win_open(path, attributes_only=True) as handle:
+                        _win_check(handle, path, sqlite_sidecar=sqlite_sidecar)
+                except BridgeError as error:
+                    if not sqlite_sidecar or error.reason != 'PATH_COLLISION':
+                        raise
+                    # NTFS can change the name of a shared handle when SQLite
+                    # unlinks a sidecar. Only a now-absent entry is safe to skip.
+                    path.lstat()
+                    raise
             return True
         except FileNotFoundError:
             return False
@@ -340,8 +349,8 @@ def database_guard(paths: WorkspacePaths):
                 pinned = handles.enter_context(_win_open(paths.db, attributes_only=True, pin=True))
                 _win_check(pinned, paths.db)
             # SQLite must be free to remove these rollback files during commit.
-            for suffix in ('-journal', '-wal', '-shm'):
-                guard.plain(paths.db.with_name(paths.db.name + suffix))
+            for name in _DB_SIDECARS:
+                guard.plain(paths.data / name, sqlite_sidecar=True)
         yield present
 
 
@@ -362,8 +371,10 @@ def _ignored(paths, path):
 def _validate_tree(paths, guard):
     """Owned marker permits only the bridge's documented names and crash temporaries."""
     for entry in paths.data.iterdir():
-        if entry.name in {'.gitignore', 'bridge.sqlite3', 'bridge.sqlite3-wal', 'bridge.sqlite3-shm', 'bridge.sqlite3-journal'} or _TEMP.fullmatch(entry.name):
-            guard.plain(entry)  # disappearance is safe during concurrent SQLite cleanup
+        if entry.name in _DB_SIDECARS:
+            guard.plain(entry, sqlite_sidecar=True)
+        elif entry.name in {'.gitignore', 'bridge.sqlite3'} or _TEMP.fullmatch(entry.name):
+            guard.plain(entry)
         elif entry.name == 'inbox':
             guard.directory(entry)
             for payload in entry.iterdir():
@@ -412,8 +423,9 @@ def verify_layout(paths: WorkspacePaths, *, create: bool) -> None:
             except FileNotFoundError:
                 raise BridgeError('UNOWNED_TRANSPORT') from None
             _validate_tree(paths, guard)
-            for suffix in ('', '-journal', '-wal', '-shm'):
-                guard.plain(paths.db.with_name(paths.db.name + suffix))
+            guard.plain(paths.db)
+            for name in _DB_SIDECARS:
+                guard.plain(paths.data / name, sqlite_sidecar=True)
             _ignored(paths, paths.db)
             _ignored(paths, paths.data / 'probe' / 'attempt-1' / 'request.md')
             if create:
@@ -665,11 +677,15 @@ if os.name == 'nt':
         _win_check(handle, path)
         return content
 
-    def _win_check(handle, path, *, directory=False):
+    def _win_check(handle, path, *, directory=False, sqlite_sidecar=False):
         info = _FileInfo()
         _win_call(_Info, handle, _ct.byref(info))
-        if (_FileType(handle) != 1 or info.attributes & 0x400 or bool(info.attributes & 0x10) != directory
-                or (not directory and info.links != 1)):
+        if _FileType(handle) != 1 or info.attributes & 0x400 or bool(info.attributes & 0x10) != directory:
+            raise BridgeError('UNSAFE_FILE_TYPE')
+        if not directory and info.links != 1:
+            if sqlite_sidecar and info.links == 0:
+                # Unlink can race with the first query on this share-delete handle.
+                path.lstat()
             raise BridgeError('UNSAFE_FILE_TYPE')
         buffer = _ct.create_unicode_buffer(32768)
         length = _win_call(_FinalPath, handle, buffer, len(buffer), 0)
