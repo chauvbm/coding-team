@@ -30,7 +30,8 @@ _RETIRED_SCRIPTS = {'ct_antigravity.py', 'ct_winjob.py', 'ct_external.py',
 _EXCLUDED_SCRIPTS = {'export_evaluation_inputs.py', 'build_runtime_package.py'} | _RETIRED_SCRIPTS
 _WORKER_SCRIPTS = ('ct_bridge_worker.py', 'ct_bridge_files.py', 'ct_bridge_store.py',
                    'ct_bridge_binding.py', 'ct_bridge_control.py', 'ct_bridge_attempts.py',
-                   'ct_bridge_install.py', 'ct_storage.py', 'ct_platform.py', 'ct_policy.py')
+                   'ct_bridge_install.py', 'ct_bridge_commands.py', 'ct_storage.py',
+                   'ct_platform.py', 'ct_policy.py')
 _SHA = re.compile(r'[0-9a-f]{64}')
 _RECOVER_HINT = 'run `coding_team.py install --recover`'
 

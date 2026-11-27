@@ -421,13 +421,30 @@ def _uninstall(args, env, home):
 
 def _policy(args, env, home):
     cfg = _config(resolve_platform(args.platform, env))
+    public = None
     if args.action == 'command':
         from ct_bridge_cli import command, is_bridge_control
+        from ct_bridge_commands import help_view, is_public_family, parse_public
 
-        if is_bridge_control(args.text):
+        public = parse_public(args.text)
+        if public == (None, 'help'):
+            return help_view(cfg['platform'], 'native'), 0
+        if public == (None, 'listen'):
+            return {'ok': False, 'state': 'NOT_READY', 'reason': 'WORKER_REQUIRED',
+                    'next_action': 'Install the managed Antigravity desktop worker, then /coding-team listen'}, 1
+        if is_public_family(args.text) or is_bridge_control(args.text):
             return command(args, SOURCE_ROOT, cfg['platform'], env, home)
     state = args.state or target_paths(cfg, 'user', env, home, None)['state_file']
     chat_id = args.chat_id if args.chat_id is not None else chat_id_from_env(cfg, env)
+    if public == (None, 'status'):
+        from ct_bridge_cli import connection_view
+
+        inter_app = connection_view(cfg['platform'], SOURCE_ROOT, env, home)
+        try:
+            result = ct_policy.describe(ct_policy.load_state(state), chat_id)
+        except Exception as error:
+            return dict(_error(error, args.action), inter_app=inter_app), 2
+        return dict(result, platform=cfg['platform'], state_path=Path(state).as_posix(), inter_app=inter_app), 0
     if args.action == 'status':
         result = ct_policy.describe(ct_policy.load_state(state), chat_id)
     else:

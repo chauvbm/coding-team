@@ -35,16 +35,26 @@ def render_rules_block(*, platform: str, python: str, cli: Path, state: Path, sk
         template = (f'one of these ({note}) ' + '; '.join(f'{label}: `{tp}`' for label, _, tp in forms) + '.')
     reference = (Path(skill_dir) / 'references/orchestration.md').as_posix()
     adaptive = (Path(skill_dir) / 'references/adaptive-planning.md').as_posix()
+    control_policy = (Path(skill_dir) / 'references/control-policy.md').as_posix()
     external = ''
     if platform == 'codex' and os.name == 'nt':
         external_ref = (Path(skill_dir) / 'references/antigravity-desktop.md').as_posix()
         external = (
-            'Optional Antigravity Desktop worker on Windows. The default is native-only. '
-            'Use the same installed command entry from the worktree for direct user messages '
-            '`/coding-team leader on|off|status`, `/coding-team antigravity on|off|pair|status|check` '
-            'and `/coding-team agy auto on|off`, including the `/team-coding` alias. '
-            'Use the runtime chat ID for bridge controls. Check the current Leader, policy, pairing and readiness '
-            f'before dispatch. See `{external_ref}` for setup and the native representative.\n\n'
+            'Antigravity Desktop starts disabled. Handle `/coding-team agy on|off` and '
+            '`/coding-team agy auto on|off` through the installed command entry in the current worktree. '
+            'Use the runtime chat ID. When pairing is pending, tell the user to send `/coding-team listen` '
+            'in the intended Antigravity chat on that worktree. Read back actual pairing and waiter readiness. '
+            'Report both native policy and inter-app state for `/coding-team status`. '
+            f'See `{external_ref}` for the readiness helper and result collection.\n\n'
+        )
+    elif platform == 'antigravity' and os.name == 'nt':
+        external = (
+            'For direct `/coding-team listen`, `/coding-team status` and `/coding-team help`, '
+            'use the installed `coding-team-desktop-worker` skill when available. Its `ct_bridge_worker.py` '
+            'handles `join`, `connection-status` and `help` in this chat. Use the active worktree and trusted '
+            'runtime chat ID. These controls remain reachable while local native policy is OFF. Handle '
+            'native policy changes through the installed native command entry. '
+            f'See `{control_policy}#external-workers` for the worker and native-only routing.\n\n'
         )
     return f'''{START}
 ## Coding-team policy and routing

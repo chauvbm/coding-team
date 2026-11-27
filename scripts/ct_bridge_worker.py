@@ -16,7 +16,8 @@ import sys
 import ct_bridge_binding as binding
 import ct_bridge_files as files
 
-COMMANDS = ('connect', 'status', 'listen', 'begin', 'resume', 'finish')
+COMMANDS = ('connect', 'status', 'listen', 'begin', 'resume', 'finish', 'join', 'connection-status', 'help')
+_PUBLIC_OPERATIONS = ('join', 'connection-status', 'help')
 MAX_PAYLOAD_BYTES = files.MAX_FILE_BYTES
 _REASON = re.compile(r'[A-Z][A-Z0-9_]{0,63}\Z', re.ASCII)
 _TASK = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z', re.ASCII)
@@ -37,11 +38,13 @@ class _Parser(argparse.ArgumentParser):
 def _arguments(argv):
     parser = _Parser(add_help=False, allow_abbrev=False)
     parser.add_argument('operation', choices=COMMANDS)
-    parser.add_argument('--workspace', required=True)
+    parser.add_argument('--workspace')
     parser.add_argument('--task-id')
     parser.add_argument('--attempt', type=int)
     parser.add_argument('--payload-file')
     args = parser.parse_args(argv)
+    if args.operation != 'help' and args.workspace is None:
+        raise WorkerInputError('INVALID_ARGUMENTS')
     keyed = args.operation in ('begin', 'resume', 'finish')
     if keyed:
         if (not args.task_id or not _TASK.fullmatch(args.task_id)
@@ -49,7 +52,7 @@ def _arguments(argv):
             raise WorkerInputError('INVALID_ARGUMENTS')
     elif args.task_id is not None or args.attempt is not None:
         raise WorkerInputError('INVALID_ARGUMENTS')
-    if args.operation in ('status', 'listen') and args.payload_file is not None:
+    if args.operation in ('status', 'listen', *_PUBLIC_OPERATIONS) and args.payload_file is not None:
         raise WorkerInputError('INVALID_ARGUMENTS')
     return args
 
@@ -71,7 +74,7 @@ def _secret(value, *, optional=False):
 
 
 def _payload(args, ctx, stdin):
-    if args.operation in ('status', 'listen'):
+    if args.operation in ('status', 'listen', *_PUBLIC_OPERATIONS):
         return {}
     if args.payload_file is not None:
         raw = files.consume_payload_file(ctx.paths, Path(args.payload_file))
@@ -113,6 +116,10 @@ def _payload(args, ctx, stdin):
 
 def _dispatch(args, ctx, payload):
     import ct_bridge_control as control
+    if args.operation == 'join':
+        return control.join_peer(ctx)
+    if args.operation == 'connection-status':
+        return control.connection_status(ctx)
     if args.operation == 'connect':
         return control.connect(ctx, payload['ticket'])
     if args.operation == 'status':
@@ -134,13 +141,19 @@ def main(argv=None, *, stdin=None, stdout=None, env=None, source_root=None, home
     stdout = stdout if stdout is not None else sys.stdout
     try:
         args = _arguments(sys.argv[1:] if argv is None else argv)
-        ctx = binding.ctx_from_runtime('antigravity', args.workspace, os.environ if env is None else env,
-            component='worker', source_root=Path(__file__).resolve().parents[1] if source_root is None else source_root,
-            home=Path.home() if home is None else home)
-        ctx.require_actor()
-        installed = ctx.own_binding()
-        payload = _payload(args, ctx, stdin)
-        view = _dispatch(args, ctx, payload)
+        if args.operation == 'help':
+            from ct_bridge_commands import help_view
+
+            view = dict(help_view('antigravity', 'worker'), ok=True, state='HELP', reason=None)
+        else:
+            ctx = binding.ctx_from_runtime('antigravity', args.workspace, os.environ if env is None else env,
+                component='worker', source_root=Path(__file__).resolve().parents[1] if source_root is None else source_root,
+                home=Path.home() if home is None else home)
+            if args.operation != 'connection-status':
+                ctx.require_actor()
+            installed = ctx.own_binding()
+            payload = _payload(args, ctx, stdin)
+            view = _dispatch(args, ctx, payload)
         if not isinstance(view, dict) or type(view.get('ok')) is not bool or not isinstance(view.get('state'), str):
             raise WorkerInputError('INVALID_HELPER_REPLY')
         view.setdefault('reason', None)
@@ -152,7 +165,7 @@ def main(argv=None, *, stdin=None, stdout=None, env=None, source_root=None, home
              (not isinstance(reason, str) or not _REASON.fullmatch(reason)))
                 or (not view['ok'] and reason is None)):
             view = {'ok': False, 'state': 'BRIDGE_OPERATION_FAILED', 'reason': 'BRIDGE_OPERATION_FAILED'}
-        if view['ok'] and args.operation == 'status':
+        if view['ok'] and args.operation in ('status', 'connection-status'):
             helper = installed.skill_dir / 'scripts' / 'ct_bridge_worker.py'
             view.update(helper=helper.as_posix(), helper_sha256=hashlib.sha256(helper.read_bytes()).hexdigest(),
                         workspace=ctx.paths.root.as_posix(), scope=installed.scope, bridge_abi=binding.BRIDGE_ABI)

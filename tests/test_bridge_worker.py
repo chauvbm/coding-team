@@ -88,6 +88,73 @@ class WorkerEntryTests(unittest.TestCase):
         self.assertEqual(view['state'], 'LEADER_NOT_SELECTED')
         self.assertFalse((self.fixture.workspace / '.coding-team').exists())
 
+    def test_worker_join_status_help(self):
+        import ct_bridge_control as control
+        self.leader()
+        opened = control.configure_peer(self.leader_ctx, 'antigravity', 'auto_off')
+        self.assertTrue(opened['ok'], opened)
+        code, joined = self.invoke('join')
+        self.assertEqual(code, 0, joined)
+        self.assertEqual(joined['state'], 'CONNECTED')
+        code, status = self.invoke('connection-status')
+        self.assertEqual(code, 0, status)
+        self.assertEqual(status['role'], 'worker')
+        self.assertTrue(status['connections'][0]['paired'])
+        self.assertFalse(status['connections'][0]['waiter_ready'])
+        code, other = self.invoke('connection-status', env={'ANTIGRAVITY_CONVERSATION_ID': 'other-chat'})
+        self.assertEqual(code, 0, other)
+        self.assertEqual(other['role'], 'unbound')
+        self.assertFalse(other['connections'][0]['paired'])
+        code, unknown = self.invoke('connection-status', env={})
+        self.assertEqual(code, 0, unknown)
+        self.assertEqual(unknown['role'], 'unknown')
+        code, help_view = self.invoke('help', env={})
+        self.assertEqual(code, 0, help_view)
+        self.assertIn('/coding-team listen', json.dumps(help_view))
+
+    def test_worker_connection_status_is_read_only_without_identity(self):
+        code, view = self.invoke('connection-status', env={})
+        self.assertEqual(code, 0, view)
+        self.assertEqual(view['role'], 'unknown')
+        self.assertFalse((self.fixture.workspace / '.coding-team').exists())
+        code, view = self.invoke('join', env={})
+        self.assertEqual(code, 2, view)
+        self.assertEqual(view['reason'], 'UNKNOWN_CHAT')
+        self.assertFalse((self.fixture.workspace / '.coding-team').exists())
+
+    def test_worker_connection_status_preserves_context_on_store_failure(self):
+        self.leader()
+        database = self.fixture.workspace / '.coding-team/bridge/bridge.sqlite3'
+        database.write_bytes(b'corrupt SQLite bytes')
+        code, view = self.invoke('connection-status')
+        self.assertEqual(code, 2, view)
+        self.assertEqual(view['reason'], 'STORE_UNAVAILABLE')
+        self.assertEqual(view['app'], 'antigravity')
+        self.assertEqual(Path(view['workspace']), self.fixture.workspace)
+        self.assertEqual(view['role'], 'unknown')
+        self.assertEqual(view['connections'], [])
+
+    def test_worker_help_requires_neither_workspace_nor_installation(self):
+        output = io.StringIO()
+        code = worker.main(['help'], stdout=output, env={}, source_root=self.base / 'missing',
+                           home=self.fixture.home)
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertIn('supported_pairs', json.loads(output.getvalue()))
+        self.assertFalse((self.fixture.workspace / '.coding-team').exists())
+
+    def test_worker_public_operations_reject_attempt_and_payload_selectors(self):
+        payload_path = self.base / 'secret.json'
+        payload_path.write_text('SECRET', encoding='utf-8')
+        for command in ('join', 'connection-status', 'help'):
+            for extra in (('--task-id', 'task'), ('--attempt', '1'),
+                          ('--payload-file', str(payload_path))):
+                with self.subTest(command=command, extra=extra):
+                    code, view = self.invoke(command, extra=extra)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(view['reason'], 'INVALID_ARGUMENTS')
+                    self.assertNotIn('SECRET', json.dumps(view))
+        self.assertEqual(payload_path.read_text(encoding='utf-8'), 'SECRET')
+
     def test_stdin_connect_consumes_invite_without_echoing_ticket(self):
         ticket = self.leader()
         code, view = self.invoke('connect', json.dumps({'ticket': ticket}).encode())

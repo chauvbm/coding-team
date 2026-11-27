@@ -20,7 +20,7 @@ _COMMANDS = {
 ATTEMPT_OPERATIONS = ('publish', 'reoffer', 'grant-read', 'collect', 'cancel-pending',
                       'reconcile', 'ack', 'cleanup')
 OPERATIONS = ('open-round', 'close-round', 'register-native', 'bind-native', 'finish-native',
-              *ATTEMPT_OPERATIONS)
+              'wait-ready', *ATTEMPT_OPERATIONS)
 _PAYLOAD_LIMIT = 3 * 1024 * 1024
 _MACHINE_REASON = re.compile(r'[A-Z][A-Z0-9_]{0,79}')
 
@@ -30,7 +30,9 @@ def is_bridge_control(text):
 
 
 def parse_control(text):
-    match = _CONTROL.fullmatch(text.strip(' \t\r\n')) if isinstance(text, str) else None
+    if not isinstance(text, str) or '\r' in text or '\n' in text:
+        return None
+    match = _CONTROL.fullmatch(text.strip(' \t'))
     if match is None:
         return None
     family, action = match.groups()
@@ -74,17 +76,64 @@ def _runtime_view(ctx):
 
 def command(args, source, platform, env, home):
     try:
-        parsed = parse_control(args.text)
+        from ct_bridge_commands import parse_public, supports_pair
+
+        public = parse_public(args.text)
+        parsed = parse_control(args.text) if public is None else public
         if parsed is None:
             _reject('INVALID_BRIDGE_COMMAND')
         if args.chat_id is not None:
             _reject('RUNTIME_CHAT_REQUIRED')
+        if public is not None:
+            target, action = public
+            if target is None:
+                _reject('INVALID_BRIDGE_COMMAND')
+            reason = 'SAME_APP' if target == platform else (
+                None if supports_pair(platform, target) else 'UNSUPPORTED_PAIR')
+            if reason:
+                view, code = _failure(BridgeInputError(reason))
+                return dict(view, next_action='/coding-team help'), code
         ctx = _context(platform, Path.cwd(), source, env, home)
         if args.state is not None and args.state.resolve() != ctx.own_binding().policy_path:
             _reject('POLICY_PATH_MISMATCH')
+        if public is not None:
+            from ct_bridge_control import configure_peer
+
+            result = configure_peer(ctx, target, action)
+            return result, (0 if result.get('ok') else 1)
         return _run_control(ctx, *parsed)
     except (OSError, ValueError, TimeoutError) as error:
-        return _failure(error)
+        view, code = _failure(error)
+        if view['reason'] == 'INVALID_BRIDGE_COMMAND':
+            view['next_action'] = '/coding-team help'
+        return view, code
+
+
+def connection_view(platform, source, env, home):
+    """Read this runtime chat only; policy --chat-id is never a bridge identity."""
+    workspace = None
+    try:
+        from ct_bridge_files import locate_workspace
+
+        workspace = locate_workspace(Path.cwd()).root.as_posix()
+        if platform != 'codex':
+            _reject('WORKER_REQUIRED' if platform == 'antigravity' else 'UNSUPPORTED_PAIR')
+        from ct_bridge_control import connection_status
+
+        ctx = _context(platform, Path(workspace), source, env, home)
+        result = connection_status(ctx)
+        reason = result.get('reason')
+        if reason is not None and (not isinstance(reason, str) or not _MACHINE_REASON.fullmatch(reason)):
+            _reject('BRIDGE_ERROR')
+        defaults = dict(app=platform, workspace=workspace, role='unknown', leader=None, connections=[],
+                        next_action='/coding-team help')
+        return dict(defaults | result, **_runtime_view(ctx))
+    except (OSError, ValueError, TimeoutError) as error:
+        view = _failure(error)[0]
+        view.update(app=platform, workspace=workspace, role='unknown', leader=None, connections=[],
+                    next_action=('Install the managed Antigravity desktop worker, then /coding-team status'
+                                 if view['reason'] == 'WORKER_REQUIRED' else '/coding-team help'))
+        return view
 
 
 def _run_control(ctx, family, action):
@@ -157,10 +206,26 @@ def _payload(stream, enabled):
 
 def bridge_command(args, source, env, home, stream):
     try:
-        ctx = _context(args.platform, args.workspace, source, env, home)
         payload = _payload(stream, args.payload_stdin)
         operation = args.operation
-        if operation == 'collect':
+        if operation == 'wait-ready':
+            fields = {'leader_epoch', 'pair_epoch', 'desktop_epoch', 'auto_epoch'}
+            if (not args.payload_stdin or payload.keys() != fields
+                    or any(type(value) is not int or value < 0 for value in payload.values())
+                    or payload['leader_epoch'] < 1
+                    or args.task_id is not None or args.attempt is not None
+                    or type(args.wait_seconds) is not int or not 0 <= args.wait_seconds <= 60):
+                _reject('INVALID_PAYLOAD')
+        ctx = _context(args.platform, args.workspace, source, env, home)
+        if operation == 'wait-ready':
+            from ct_bridge_binding import LeaderRef
+            from ct_bridge_control import wait_ready
+
+            expected = LeaderRef(ctx.require_leader(), payload['leader_epoch'])
+            result = wait_ready(ctx, expected, pair_epoch=payload['pair_epoch'],
+                                desktop_epoch=payload['desktop_epoch'], auto_epoch=payload['auto_epoch'],
+                                wait_seconds=args.wait_seconds)
+        elif operation == 'collect':
             if payload.keys() - {'grant'}:
                 _reject('INVALID_PAYLOAD')
             result = _collect(ctx, _key(args), payload.get('grant'), args.wait_seconds)

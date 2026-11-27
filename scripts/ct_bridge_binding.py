@@ -29,6 +29,7 @@ _COMMON = {'SKILL.md', 'scripts/ct_bridge_binding.py', 'scripts/ct_bridge_files.
 _REQUIRED = {'leader': _COMMON | {'scripts/coding_team.py', 'scripts/ct_bridge_cli.py',
                                  'platforms/codex.json'},
              'worker': _COMMON | {'scripts/ct_bridge_worker.py', 'platforms/antigravity.json'}}
+_CATALOG = 'scripts/ct_bridge_commands.py'
 
 
 class BindingError(ValueError):
@@ -77,7 +78,7 @@ def _unique_keys(pairs):
     return values
 
 
-def _read_manifest(skill_dir, component):
+def _read_manifest(skill_dir, component, *, require_catalog=False):
     _require(component in _REQUIRED)
     skill_dir = _canonical(skill_dir)
     manifest_path = skill_dir / MANIFEST_NAME
@@ -95,6 +96,8 @@ def _read_manifest(skill_dir, component):
     _require(isinstance(files, dict) and isinstance(files.get('skill_dir'), dict))
     entries = files['skill_dir']
     _require(_REQUIRED[component] <= entries.keys())
+    if require_catalog:
+        _require(_CATALOG in entries)
     for relative, digest in entries.items():
         _relative(relative)
         _require(isinstance(digest, str) and _SHA.fullmatch(digest) is not None)
@@ -211,7 +214,7 @@ class BridgeContext:
             candidates = {_canonical(user_root / name),
                           _canonical(self.paths.root / '.agents/skills' / name)}
             _require(skill in candidates)
-            data, digest = _read_manifest(skill, component)
+            data, digest = _read_manifest(skill, component, require_catalog=own)
             platform = 'codex' if component == 'leader' else 'antigravity'
             cfg = load_platform(platform, skill)
             env = dict(self.env)

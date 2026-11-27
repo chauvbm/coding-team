@@ -70,7 +70,7 @@ class BridgeControlTests(unittest.TestCase):
         skill = (self.home / '.agents/skills/coding-team' if component == 'leader' else
                  self.home / '.gemini/config/skills/coding-team-desktop-worker')
         names = ('ct_bridge_binding', 'ct_bridge_files', 'ct_bridge_store', 'ct_platform', 'ct_storage',
-                 'ct_policy', 'ct_bridge_control', 'ct_bridge_attempts', 'ct_bridge_install')
+                 'ct_policy', 'ct_bridge_control', 'ct_bridge_attempts', 'ct_bridge_install', 'ct_bridge_commands')
         names += ('coding_team', 'ct_bridge_cli') if component == 'leader' else ('ct_bridge_worker',)
         files = {'SKILL.md': b'fixture skill\n'}
         files.update({f'scripts/{name}.py': f'# fixture {name}\n'.encode() for name in names})
@@ -96,6 +96,251 @@ class BridgeControlTests(unittest.TestCase):
         self.assertTrue(view['ok'], view)
         return self.binding.LeaderRef(ctx.actor, view['leader_epoch'])
 
+    def configure(self, action='auto_on', ctx=None):
+        self.assertTrue(hasattr(control, 'configure_peer'), 'atomic inter-app configuration is missing')
+        return control.configure_peer(ctx or self.a, 'antigravity', action)
+
+    def group(self):
+        with control.Store(self.paths).read() as db:
+            return dict(db.execute('SELECT * FROM group_state').fetchone())
+
+    def test_configure_implicit_leader_and_modes(self):
+        view = self.configure('auto_off')
+        self.assertTrue(view['ok'], view)
+        self.assertTrue(view['desktop_enabled'])
+        self.assertFalse(view['auto_enabled'])
+        first = self.group()
+        self.assertRegex(first['invite_hash'], r'^listen:[0-9a-f]{32}$')
+        self.assertNotIn('listen:', json.dumps(view))
+        again = self.configure('on')
+        self.assertEqual(again['pair_epoch'], first['pair_epoch'])
+        self.assertEqual(self.group()['invite_hash'], first['invite_hash'])
+        self.assertTrue(control.join_peer(self.worker)['ok'])
+        paired = self.group()
+        auto = self.configure()
+        self.assertTrue(auto['auto_enabled'])
+        self.assertEqual(auto['pair_epoch'], paired['pair_epoch'])
+        self.assertTrue(self.configure('on')['auto_enabled'])
+        self.assertFalse(self.configure('auto_off')['auto_enabled'])
+        self.assertEqual(self.group()['worker_chat'], 'worker-a')
+
+    def test_activate_during_drain_keeps_result_authority(self):
+        for state in ('RUNNING', 'NEEDS_USER', 'OUTCOME_UNKNOWN', 'COMPLETED'):
+            with self.subTest(state=state):
+                self.assertTrue(self.configure()['ok'])
+                self.assertTrue(control.join_peer(self.worker)['ok'])
+                ref = self.binding.LeaderRef(self.a.actor, self.group()['leader_epoch'])
+                rid = control.open_round(self.a, ref)
+                self.attempt_fixture(ref, rid, state, 'auto', 'CT-' + state)
+                if state == 'COMPLETED':
+                    with control.Store(self.paths).write() as db:
+                        db.execute("UPDATE attempts SET result_id='receipt' WHERE task_id=?", ('CT-' + state,))
+                self.assertTrue(self.configure('off')['ok'])
+                preserved = self.group()
+                for action in ('on', 'auto_on', 'auto_off'):
+                    denied = self.configure(action)
+                    self.assertEqual(denied['reason'], 'LEADER_BUSY', denied)
+                    self.assertEqual(self.group(), preserved)
+                self.assertEqual(control.set_desktop(self.a, ref, True)['reason'], 'LEADER_BUSY')
+                self.assertEqual(preserved['desktop_enabled'], 0)
+                self.assertEqual(preserved['worker_chat'], 'worker-a')
+                with control.Store(self.paths).write() as db:
+                    db.execute("UPDATE attempts SET state='COMPLETED',ack_at=1200 WHERE task_id=?", ('CT-' + state,))
+                self.assertTrue(control.close_round(self.a, ref, rid, 'review complete')['ok'])
+                enabled = control.set_desktop(self.a, ref, True)
+                self.assertTrue(enabled['ok'], enabled)
+                self.assertFalse(self.group()['auto_enabled'])
+                self.assertIsNone(self.group()['worker_chat'])
+                self.assertGreater(self.group()['pair_epoch'], preserved['pair_epoch'])
+
+    def test_join_only_matching_current_invite(self):
+        self.assertTrue(self.configure()['ok'])
+        clock = [1000.0]
+        real = control.Store
+        with mock.patch.object(control, 'Store', lambda paths: real(paths, clock=lambda: clock[0])):
+            self.configure('off')
+            self.configure()
+            clock[0] = 1600.0
+            self.assertEqual(control.join_peer(self.worker)['reason'], 'EXPIRED')
+            renewed = self.configure()
+            self.assertTrue(renewed['ok'])
+            marker = self.group()['invite_hash']
+            self.assertFalse(control.connect(self.worker, marker)['ok'])
+            self.assertTrue(control.join_peer(self.worker)['ok'])
+            self.assertTrue(control.join_peer(self.worker)['ok'])
+            other = self.context('antigravity', 'worker-b', 'worker')
+            self.assertEqual(control.join_peer(other)['reason'], 'WRONG_WORKER')
+            self.assertEqual(control.join_peer(self.context('antigravity', None, 'worker'))['reason'], 'UNKNOWN_CHAT')
+        ref = self.binding.LeaderRef(self.a.actor, self.group()['leader_epoch'])
+        ticket = control.invite(self.a, ref)['ticket']
+        self.assertEqual(control.join_peer(self.worker)['reason'], 'NO_INVITE')
+        self.assertTrue(control.connect(self.worker, ticket)['ok'])
+
+    def test_join_race_and_stale_observation(self):
+        self.configure()
+        # Change the authority at the same manifest location between observation
+        # and the real lock acquisition. A stale listen cannot join the new chat.
+        from contextlib import contextmanager
+        real = control._guard
+        @contextmanager
+        def raced(ctx, **kwargs):
+            self.assertTrue(self.configure(ctx=self.b)['ok'])
+            with real(ctx, **kwargs) as result:
+                yield result
+        with mock.patch.object(control, '_guard', raced):
+            self.assertEqual(control.join_peer(self.worker)['reason'], 'STALE_INVITE')
+        gate = threading.Barrier(2)
+        results = []
+        def join(ctx):
+            gate.wait()
+            results.append(control.join_peer(ctx))
+        threads = [threading.Thread(target=join, args=(ctx,)) for ctx in
+                   (self.worker, self.context('antigravity', 'worker-b', 'worker'))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(sum(result['ok'] for result in results), 1, results)
+        self.assertIn(next(result['reason'] for result in results if not result['ok']), ('WRONG_WORKER', 'STALE_INVITE'))
+
+    def test_connection_status_by_local_role(self):
+        self.configure('auto_off')
+        initial = control.connection_status(self.worker)
+        self.assertEqual(initial['connections'][0]['readiness'], 'PAIRING')
+        self.assertEqual(initial['connections'][0]['next_action'], '/coding-team listen')
+        self.assertTrue(control.join_peer(self.worker)['ok'])
+        before = self.paths.db.read_bytes()
+        files = {p.relative_to(self.base).as_posix() for p in self.base.rglob('*')}
+        for ctx, role in ((self.a, 'leader'), (self.b, 'unbound'), (self.worker, 'worker'),
+                          (self.context('antigravity', 'other', 'worker'), 'unbound'),
+                          (self.context('antigravity', None, 'worker'), 'unknown')):
+            status = control.connection_status(ctx)
+            self.assertEqual(status['role'], role, status)
+            self.assertEqual(status['workspace'], str(self.root.resolve()))
+            self.assertEqual(status['leader']['chat_id'], 'chat-a')
+            self.assertNotIn('listen:', json.dumps(status))
+            if ctx.component == 'worker' and role != 'worker':
+                self.assertFalse(status['connections'][0]['paired'])
+                self.assertFalse(status['connections'][0]['waiter_ready'])
+        self.assertEqual(control.connection_status(self.worker)['connections'][0]['readiness'], 'MANUAL_READY')
+        self.assertEqual(before, self.paths.db.read_bytes())
+        self.configure()
+        self.assertEqual(control.connection_status(self.worker)['connections'][0]['readiness'], 'WAITING')
+        self.configure('auto_off')
+        # No reads changed a byte or created a sidecar.
+        self.assertEqual(files, {p.relative_to(self.base).as_posix() for p in self.base.rglob('*')})
+        self.assertTrue(before)
+
+    def test_wait_ready_only_for_current_activation(self):
+        view = self.configure()
+        ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
+        epochs = {name: view[name] for name in ('pair_epoch', 'desktop_epoch', 'auto_epoch')}
+        before = self.paths.db.read_bytes()
+        waiting = control.wait_ready(self.a, ref, **epochs, wait_seconds=0)
+        self.assertEqual(waiting['state'], 'WAITING', waiting)
+        self.assertIsNone(self.group()['worker_chat'])
+        self.assertEqual(before, self.paths.db.read_bytes())
+        self.assertEqual(control.wait_ready(self.b, ref, **epochs, wait_seconds=0)['reason'], 'STALE_ACTIVATION')
+        for invalid in (True, -1, 61, 1.5):
+            self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=invalid)['reason'], 'INVALID_WAIT_SECONDS')
+        self.assertTrue(control.join_peer(self.worker)['ok'])
+        self.configure('auto_off')
+        self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=0)['reason'], 'STALE_ACTIVATION')
+        self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=0)['connections'], [])
+
+    def test_wait_ready_observes_waiter_policy_and_expiry_without_writes(self):
+        from dataclasses import asdict
+        view = self.configure()
+        control.join_peer(self.worker)
+        ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
+        epochs = {name: view[name] for name in ('pair_epoch', 'desktop_epoch', 'auto_epoch')}
+        def listener_appears(_):
+            with control.Store(self.paths).write() as db:
+                row = db.execute('SELECT * FROM group_state').fetchone()
+                stamp = control._policy(self.a.own_binding(), row)
+                db.execute('''INSERT INTO waiter(id,nonce,leader_epoch,pair_epoch,auto_epoch,
+                    desktop_epoch,policy_stamp,expires_at) VALUES(1,'private',?,?,?,?,?,?)''',
+                    (row['leader_epoch'], row['pair_epoch'], row['auto_epoch'], row['desktop_epoch'],
+                     json.dumps(asdict(stamp), sort_keys=True, separators=(',', ':')), time.time() + 30))
+        with mock.patch.object(control.time, 'sleep', listener_appears):
+            ready = control.wait_ready(self.a, ref, **epochs, wait_seconds=1)
+        self.assertEqual(ready['state'], 'READY', ready)
+        self.assertEqual(ready['connections'][0]['readiness'], 'AUTO_READY')
+        self.assertNotIn('private', json.dumps(ready))
+        before = self.paths.db.read_bytes()
+        self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=0)['state'], 'READY')
+        self.assertEqual(before, self.paths.db.read_bytes())
+        with control.Store(self.paths).write() as db:
+            db.execute('UPDATE waiter SET expires_at=0')
+        self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=0)['state'], 'WAITING')
+        import ct_policy
+        ct_policy.apply_command(self.policy, '/coding-team off', 'chat-a')
+        self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=0)['reason'], 'NATIVE_POLICY_OFF')
+        self.assertTrue(self.configure('off')['ok'])
+
+    def test_invalid_activation_is_nonmutating_and_policy_off_cannot_initialize(self):
+        import ct_policy
+        before = self.policy.read_bytes()
+        files = {p.relative_to(self.base).as_posix() for p in self.base.rglob('*')}
+        self.assertEqual(control.configure_peer(self.a, 'codex', 'on')['reason'], 'UNSUPPORTED_PAIR')
+        self.assertEqual(control.configure_peer(self.a, 'claude-code', 'on')['reason'], 'UNSUPPORTED_PAIR')
+        self.assertEqual(control.configure_peer(self.a, 'antigravity', 'garbage')['reason'], 'INVALID_ACTION')
+        self.assertEqual(control.configure_peer(self.worker, 'antigravity', 'on')['reason'], 'UNSUPPORTED_LEADER')
+        self.assertEqual(control.connection_status(self.context('antigravity', None, 'worker'))['role'], 'unknown')
+        self.assertFalse(self.paths.db.exists())
+        self.assertEqual(before, self.policy.read_bytes())
+        self.assertEqual(files, {p.relative_to(self.base).as_posix() for p in self.base.rglob('*')})
+        ct_policy.apply_command(self.policy, '/coding-team off', 'chat-a')
+        self.assertEqual(self.configure()['reason'], 'NATIVE_POLICY_OFF')
+        self.assertFalse(self.paths.db.exists())
+
+    def test_off_preserves_real_receipt_and_blocks_pending_start(self):
+        import ct_bridge_attempts as attempts
+        from ct_bridge_files import AttemptKey
+        view = self.configure('on')
+        self.assertTrue(control.join_peer(self.worker)['ok'])
+        ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
+        rid = control.open_round(self.a, ref)
+        first = attempts.publish(self.a, ref, rid, attempts.Request('running', b'private request'))
+        second = attempts.publish(self.a, ref, rid, attempts.Request('pending', b'pending request'))
+        key = AttemptKey(first['task_id'], first['attempt_no'])
+        pending = AttemptKey(second['task_id'], second['attempt_no'])
+        begun = attempts.begin(self.worker, key, None)
+        self.assertTrue(begun['ok'], begun)
+        self.assertEqual(control.connection_status(self.worker)['connections'][0]['readiness'], 'WORKING')
+        self.assertTrue(self.configure('off')['ok'])
+        self.assertFalse(attempts.begin(self.worker, pending, None)['ok'])
+        self.assertEqual(self.configure('on')['reason'], 'LEADER_BUSY')
+        finished = attempts.finish(self.worker, key, begun['execution_ticket'], 'COMPLETED', b'private final result')
+        self.assertTrue(finished['ok'], finished)
+        self.assertEqual(self.configure('on', self.b)['reason'], 'LEADER_BUSY')
+        status = json.dumps(control.connection_status(self.a))
+        self.assertNotIn('private', status)
+        self.assertNotIn(begun['execution_ticket'], status)
+        self.assertTrue(attempts.ack(self.a, ref, key, finished['result_id'])['ok'])
+        self.assertTrue(control.close_round(self.a, ref, rid, 'review complete')['ok'])
+        self.assertTrue(self.configure('on')['ok'])
+        self.assertIsNone(self.group()['worker_chat'])
+
+    def test_wait_ready_stops_at_expiry_or_changed_generation(self):
+        clock = [1000.0]
+        real = control.Store
+        with mock.patch.object(control, 'Store', lambda paths: real(paths, clock=lambda: clock[0])):
+            view = self.configure()
+            ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
+            epochs = {name: view[name] for name in ('pair_epoch', 'desktop_epoch', 'auto_epoch')}
+            clock[0] = 1600.0
+            before = self.paths.db.read_bytes()
+            self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=60)['state'], 'EXPIRED')
+            self.assertEqual(before, self.paths.db.read_bytes())
+            view = self.configure()
+            epochs = {name: view[name] for name in epochs}
+            def transfer(_):
+                self.assertTrue(self.configure(ctx=self.b)['ok'])
+            with mock.patch.object(control.time, 'sleep', transfer):
+                stale = control.wait_ready(self.a, ref, **epochs, wait_seconds=60)
+            self.assertEqual(stale['reason'], 'STALE_ACTIVATION')
     def test_status_does_not_create_policy_or_db(self):
         before = self.policy.read_bytes()
         view = control.leader_status(self.a)

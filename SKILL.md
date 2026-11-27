@@ -55,6 +55,8 @@ Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `
 
 If this installation offers an [external Desktop worker](references/control-policy.md#external-workers), handle its direct user controls with the installed `command` entry from the worktree. Check active Leader, native policy, opt-in, pairing and delivery readiness before assigning work. Open a coordination round before dispatch, and keep it open while reviewing a worker result. Follow the platform guide for the native representative, repeated corrections and recovery.
 
+For direct `/coding-team status`, `/coding-team help` or `/coding-team listen`, check the [external worker routing](references/control-policy.md#external-workers) before responding. If this chat is the Desktop worker, follow its installed worker skill for these commands. Handle native policy changes with the native command entry.
+
 | Role | Purpose | Ledger role |
 | --- | --- | --- |
 | `ct-architect` | Read-only design, interfaces, file-ownership matrix | Architect |

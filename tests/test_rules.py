@@ -138,6 +138,21 @@ class RulesTests(unittest.TestCase):
             self.assertNotIn('PowerShell', text)
             self.assertNotIn('& ', text.split('Chat id contract')[0])
 
+    @unittest.skipUnless(os.name == 'nt', 'inter-app Desktop setup on Windows')
+    def test_desktop_rules_route_canonical_controls_in_each_chat(self):
+        leader = self.block(platform='codex')
+        worker = self.block(platform='antigravity')
+
+        self.assertIn('/coding-team agy on|off', leader)
+        self.assertIn('/coding-team agy auto on|off', leader)
+        self.assertNotIn('/coding-team antigravity pair', leader)
+        for command in ('/coding-team listen', '/coding-team status', '/coding-team help'):
+            self.assertIn(command, worker)
+        self.assertIn('coding-team-desktop-worker', worker)
+        self.assertIn('ct_bridge_worker.py', worker)
+        self.assertIn('connection-status', worker)
+        self.assertNotIn('ct_bridge_worker.py', self.block(platform='claude-code'))
+
     @staticmethod
     def _forms(text):
         """Return {label: (status_command, command_template)} from a rendered block."""

@@ -49,6 +49,7 @@ class BindingTests(unittest.TestCase):
                     'ct_bridge_attempts', 'ct_policy'] if component == 'leader' else [
                         'ct_bridge_worker', 'ct_bridge_control', 'ct_bridge_attempts', 'ct_policy']
         files = {'SKILL.md': b'fixture skill\n'}
+        files['scripts/ct_bridge_commands.py'] = (ROOT / 'scripts/ct_bridge_commands.py').read_bytes()
         files.update({f'scripts/{name}.py': f'# fixture {name}\n'.encode() for name in scripts})
         for name in (platform,):
             files[f'platforms/{name}.json'] = (ROOT / f'platforms/{name}.json').read_bytes()
@@ -163,6 +164,18 @@ class BindingTests(unittest.TestCase):
         self.rewrite(manifest, record)
         with self.assertRaises(ValueError):
             self.context(skill).own_binding()
+
+    def test_catalog_is_required_for_own_runtime_but_legacy_peer_remains_compatible(self):
+        leader, _, _ = self.install()
+        worker, worker_manifest, worker_record = self.install('worker')
+        catalog_rel = 'scripts/ct_bridge_commands.py'
+        (worker / catalog_rel).unlink()
+        del worker_record['files']['skill_dir'][catalog_rel]
+        self.rewrite(worker_manifest, worker_record)
+        # An older ABI-1 worker is still a valid peer for the new Leader.
+        self.assertEqual(self.context(leader).worker_binding(worker_manifest).component, 'worker')
+        with self.assertRaises(ValueError):
+            self.context(worker, 'worker', {'ANTIGRAVITY_CONVERSATION_ID': 'worker-chat'}).own_binding()
 
     def test_manifest_rejects_unrelated_policy_and_lock(self):
         self.require_module()

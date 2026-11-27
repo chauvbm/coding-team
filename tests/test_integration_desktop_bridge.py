@@ -145,11 +145,23 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
             args += ['--task-id', key[0], '--attempt', key[1]]
         return self.invoke(self.leader_cli, args, payload=payload, chat=chat, ok=ok)
 
+    def wait_ready(self, payload, *, seconds=0, chat='leader-chat', ok=True):
+        args = ['bridge', 'wait-ready', '--platform', 'codex', '--workspace', self.workspace,
+                '--payload-stdin', '--wait-seconds', str(seconds)]
+        return self.invoke(self.leader_cli, args, payload=payload, chat=chat, ok=ok)
+
     def worker(self, operation, payload=None, *, key=None, chat='worker-chat', ok=True):
         args = [operation, '--workspace', self.workspace]
         if key:
             args += ['--task-id', key[0], '--attempt', key[1]]
         return self.invoke(self.worker_cli, args, payload=payload, chat=chat, worker=True, ok=ok)
+
+    def native_cli(self):
+        return self.home / '.gemini/config/skills/coding-team/scripts/coding_team.py'
+
+    def native_command(self, text, *, chat='leader-chat', ok=True):
+        return self.invoke(self.native_cli(), ['command', text, '--platform', 'antigravity'],
+                           chat=chat, worker=True, ok=ok)
 
     def select_and_pair(self):
         selected = self.control('/coding-team leader on')
@@ -205,6 +217,101 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
     def close_round(self, round_id):
         self.assertEqual(self.bridge('close-round', {'leader_epoch': self.epoch, 'round_id': round_id,
                          'evidence': 'Fixture result reviewed and reconciled'})['state'], 'ROUND_CLOSED')
+
+    def test_public_controls_from_installed_helpers(self):
+        """A public command implicitly selects this chat and starts one invitation."""
+        activated = self.control('/coding-team agy auto on')
+        self.assertTrue(activated['desktop_enabled'])
+        self.assertTrue(activated['auto_enabled'])
+        self.assertEqual(activated['state'], 'CONFIGURED')
+        self.assertTrue(activated['invite_expires_at'])
+        self.assertEqual(activated['leader_epoch'], 1)
+        status = self.control('/coding-team status')
+        self.assertEqual(status['inter_app']['role'], 'leader')
+        self.assertEqual(status['inter_app']['connections'][0]['desktop_enabled'], True)
+        worker = self.worker('connection-status')
+        self.assertEqual(worker['role'], 'unbound')
+        joined = self.worker('join')
+        self.assertEqual(joined['state'], 'CONNECTED')
+        worker_status = self.worker('connection-status')
+        self.assertEqual(worker_status['role'], 'worker')
+        self.assertTrue(worker_status['connections'][0]['paired'])
+        other_status = self.worker('connection-status', chat='other-worker-chat')
+        self.assertEqual(other_status['role'], 'unbound')
+        unknown_status = self.worker('connection-status', chat=None)
+        self.assertEqual(unknown_status['role'], 'unknown')
+
+    def test_activation_wait_and_two_chat_status(self):
+        """The same activation moves from invitation to AUTO_READY only after its worker listens."""
+        activated = self.control('/coding-team agy auto on')
+        epochs = {name: activated[name] for name in
+                  ('leader_epoch', 'pair_epoch', 'desktop_epoch', 'auto_epoch')}
+        before_join = self.wait_ready(epochs)
+        self.assertEqual(before_join['state'], 'WAITING')
+        self.assertFalse(before_join.get('paired', False))
+
+        joined = self.worker('join')
+        self.assertEqual(joined['state'], 'CONNECTED')
+        waiting = self.wait_ready(epochs)
+        self.assertTrue(waiting.get('paired'))
+        self.assertFalse(waiting.get('waiter_ready'))
+        self.assertEqual(waiting['state'], 'WAITING')
+
+        listener = self.start_listener()
+        ready = self.wait_ready(epochs)
+        self.assertEqual(ready['state'], 'READY')
+        connection = self.worker('connection-status')['connections'][0]
+        self.assertTrue(connection['paired'])
+        self.assertTrue(connection['waiter_ready'])
+        self.assertEqual(connection['readiness'], 'AUTO_READY')
+        # The same activation remains valid while the worker's attached listener is alive.
+        self.assertEqual(ready['leader_epoch'], epochs['leader_epoch'])
+        self.stop_listener(listener)
+
+    def test_legacy_pair_and_receipts_readable(self):
+        """A v1-style ticket pair and receipt remain visible to the public status command."""
+        self.select_and_pair()
+        status = self.control('/coding-team status')
+        conn = status['inter_app']['connections'][0]
+        self.assertTrue(conn['paired'])
+        self.assertFalse(conn['auto_enabled'])
+        round_id = self.open_round()
+        _, key = self.publish(round_id, 'Read the fixture and return evidence.\n')
+        begun = self.worker('begin', {}, key=key)
+        turned_off = self.control('/coding-team agy off')
+        self.assertFalse(turned_off['desktop_enabled'])
+        result = 'v1-style receipt fixture result.\n'
+        receipt = self.finish_attempt(key, begun, result)
+        self.ack(key, receipt)
+        self.close_round(round_id)
+        self.assertEqual(self.attempt_path(key, 'result.md').read_bytes(), result.encode())
+        self.assertEqual(hashlib.sha256(self.attempt_path(key, 'result.md').read_bytes()).hexdigest(),
+                         receipt['result_sha256'])
+        status_after_receipt = self.control('/coding-team status')
+        self.assertFalse(status_after_receipt['inter_app']['connections'][0]['desktop_enabled'])
+        self.assertFalse(status_after_receipt['inter_app']['connections'][0]['auto_enabled'])
+        reopened = self.control('/coding-team agy on')
+        self.assertTrue(reopened['desktop_enabled'])
+        self.assertFalse(reopened['auto_enabled'])
+        self.assertTrue(reopened['invite_expires_at'])
+        self.assertFalse(self.control('/coding-team status')['inter_app']['connections'][0]['paired'])
+
+    def test_worker_only_and_native_rules_route_same_commands(self):
+        """Worker-only help works, then the co-installed native component exposes shared help/status."""
+        self.assertFalse(self.native_cli().exists())
+        worker_help = self.worker('help', chat=None)
+        self.assertIn('/coding-team listen', json.dumps(worker_help))
+        worker_status = self.worker('connection-status', chat=None)
+        self.assertEqual(worker_status['role'], 'unknown')
+
+        self.install('antigravity')
+        self.assertTrue(self.native_cli().is_file())
+        native_help = self.native_command('/coding-team help')
+        self.assertIn('/coding-team listen', json.dumps(native_help))
+        native_status = self.native_command('/coding-team status')
+        self.assertIn('inter_app', native_status)
+        installed_worker_help = self.worker('help', chat=None)
+        self.assertIn('/coding-team listen', json.dumps(installed_worker_help))
 
     def test_manual_installed_handoff_scoped_read_ack_and_wrong_chat(self):
         """Catches broken installed imports, cross-chat access, or unreviewed closure."""
