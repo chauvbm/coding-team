@@ -182,6 +182,50 @@ class InstallTests(unittest.TestCase):
                 self.assertNotIn('backups', names)
                 self.assertFalse([n for n in names if n.startswith('.staging-')])
 
+    def test_worker_is_separate_managed_component_in_both_scopes(self):
+        source = self.copy_source()
+        worker_source = source / 'workers/antigravity'
+        worker_source.mkdir(parents=True, exist_ok=True)
+        worker_source.joinpath('SKILL.md').write_bytes(b'worker fixture\n')
+        for name in ('ct_bridge_worker', 'ct_bridge_files', 'ct_bridge_store', 'ct_bridge_binding',
+                     'ct_bridge_control', 'ct_bridge_attempts', 'ct_bridge_install'):
+            path = source / 'scripts' / (name + '.py')
+            if not path.exists():
+                path.write_bytes(b'# fixture runtime module\n')
+        self.install('antigravity', default='off', global_rules=True)
+        native_paths = self.paths('antigravity')
+        before = snapshot(self.home)
+        for scope in ('user', 'project'):
+            plan = ct_install.build_plan(source, self.cfg('antigravity'), scope=scope,
+                                         env=self.env, home=self.home, project_dir=self.project,
+                                         desktop_worker=True)
+            expected = (self.home / '.gemini/config/skills/coding-team-desktop-worker' if scope == 'user'
+                        else self.project / '.agents/skills/coding-team-desktop-worker')
+            self.assertEqual(plan.paths['skill_dir'], expected)
+            self.assertNotEqual(plan.paths['lock_file'], native_paths['lock_file'])
+            self.assertNotEqual(plan.paths['journal_file'], native_paths['journal_file'])
+            self.assertFalse(any(label == 'agents_dir' for label, _, _ in plan.files))
+            self.assertIsNone(plan.rules_block)
+            self.assertIsNone(plan.state_default)
+            self.apply(plan)
+            manifest = json.loads((expected / 'install-manifest.json').read_bytes())
+            self.assertEqual((manifest['bridge_abi'], manifest['component']), (1, 'worker'))
+            self.assertEqual((expected / 'SKILL.md').read_bytes(), b'worker fixture\n')
+            ct_install.uninstall(self.cfg('antigravity'), scope=scope, env=self.env, home=self.home,
+                                 project_dir=self.project, desktop_worker=True)
+            self.assertFalse(expected.exists())
+        after = snapshot(self.home)
+        for rel, digest in before.items():
+            self.assertEqual(after.get(rel), digest, rel)
+
+    def test_worker_rejects_leader_options_and_other_platforms(self):
+        for platform, extra in (('codex', {}), ('antigravity', {'default': 'off'}),
+                                ('antigravity', {'global_rules': True}),
+                                ('antigravity', {'docs_mcp': ['docs']})):
+            with self.subTest(platform=platform, extra=extra), self.assertRaises(ValueError):
+                ct_install.build_plan(ROOT, self.cfg(platform), scope='user', env=self.env,
+                                      home=self.home, desktop_worker=True, **extra)
+
     def test_install_layout_per_platform(self):
         self.install('claude-code')
         claude = self.home / '.claude'

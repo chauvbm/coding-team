@@ -21,6 +21,8 @@ All mutating commands return exit 0 after a structurally valid record is saved, 
 
 `gate` checks current required plan/scope approvals and material findings; `delivery` additionally requires the baseline's verification evidence for every scope. AUTO tasks may leave `required_reviews` empty. Gated tasks must name Architect, Developer and QA with three distinct identities in each scope. Invalid initial assignments are rejected rather than saved; a valid transfer that makes effective representatives collide leaves readiness HOLD. Distinct labels do not establish independence; the coordinator must check actual identities and authorship. The same QA can perform FinalQA. A successful plan gate does not replace final verification.
 
+For adaptive Spec/Plan work, a `gated: false` baseline with nonempty `required_reviews` can record the selected Plan-review responsibilities without activating the three-core gate. A successful ledger gate does not establish the separate Spec review or either user's approval; follow [adaptive planning](adaptive-planning.md) and keep its stage evidence in the Leader's planning record.
+
 ## Completion and outstanding final verdicts
 
 Delivery additionally requires every required work item to be DONE or validly cancelled. Missing `required` means true for legacy items. PENDING/ACTIVE required work holds delivery even when FinalQA approved; it does not block the plan gate. IDs cannot be removed on update and a required item cannot become optional. New audit events retain work-item snapshots, including cancellation claims.

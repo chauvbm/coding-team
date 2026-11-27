@@ -56,6 +56,8 @@ At STOP_HOLD, report the blocker and smallest next step. Do not ask for a specul
 
 ## Consensus Gate and scoped approvals
 
+Adaptive Spec/Plan work follows [two review stages and their corresponding user approvals](adaptive-planning.md). The selected roster can be a single independent reviewer; adaptive planning alone does not trigger FULL_TEAM. These are behavioral instructions and do not enforce or authenticate approval at runtime.
+
 For FULL_TEAM, a selected full-team plan review or a user-required gate, record:
 
 ```text

@@ -33,6 +33,7 @@ Send a self-contained request containing:
 - Role/variant ID (for example `ct-reviewer-verify`), bounded objective, acceptance criteria, expected deliverable and evidence.
 - Exact workspace, ownership or inspection scope, allowed actions and stopping conditions.
 - Stage: investigate, plan-review, implement or verify.
+- For adaptive Spec/Plan review, identify which artifact and exact version is under review, the original user requirements, the reviewer's questions and scope, and the Plan's approved Spec dependency where applicable. Reviewers return findings to the Leader; they do not author or approve artifacts for the user.
 - Preferred Tier and Requested Model/effort, plus user pins; say if a force-model variable is active.
 - The actual guarantees for this platform and role, copied from the agent or `doctor`, labeled ENFORCED or ADVISORY.
 - Allowed technique skills, by name (for example test-driven-development, systematic-debugging, verification-before-completion, receiving-code-review), and the forbidden ones: coding-team, subagent-driven-development, dispatching-parallel-agents, executing-plans, requesting-code-review.
@@ -53,6 +54,8 @@ Keep context scoped to the assignment. Initial reviewers must not see peers' ver
 When reusing an agent, explicitly change its stage and send the latest plan, ownership and constraints. Stop or await a writer before another agent takes ownership of its files.
 
 ## Handoff evidence
+
+An [Antigravity Desktop worker's native representative](antigravity-desktop.md#assign-and-collect) receives one attempt key, its canonical worktree and a short-lived read grant. The representative calls the installed read-only collect operation and returns the attempt state, result ID and digest through the native subagent callback. Leader owns acknowledgment, review and closure. Role separation is ADVISORY. The helper enforces grant scope and expiry.
 
 Return a concise result with role/variant, work-item and canonical issue IDs, inspected snapshot and paths, findings, changed files, actual checks and remaining limitations. Include the Spec/Plan pair, reviewed scope and explicit verdict for plan reviews. A reassessment states which finding changed and what evidence justifies it; silence is not acceptance.
 

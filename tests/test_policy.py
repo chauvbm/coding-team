@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 
 import ct_policy as policy  # noqa: E402
+import ct_storage  # noqa: E402
 
 
 class PolicyTests(unittest.TestCase):
@@ -71,6 +72,36 @@ class PolicyTests(unittest.TestCase):
         fresh = self.root / 'fresh.json'
         self.assertEqual(policy.initialize_state(fresh)[0]['global_policy'], 'ON')
 
+    def test_prepare_initialization_stages_bytes_and_preserves_counters(self):
+        policy.initialize_state(self.state, 'off')
+        with ct_storage.locked(self.state):
+            policy.initialize_policy_epochs(self.state)
+        policy.apply_command(self.state, '/coding-team on', 'explicit')
+        old = self.state.read_bytes()
+        with ct_storage.locked(self.state):
+            self.assertIsNone(policy.prepare_initialization(self.state))
+            payload = policy.prepare_initialization(self.state, 'on')
+            self.assertEqual(self.state.read_bytes(), old)
+            ct_storage.atomic_write(self.state, payload)
+            self.assertEqual(policy.policy_stamp(self.state, 'inherited', require_epochs=True),
+                             policy.PolicyStamp('ON', 0, 1))
+            self.assertEqual(policy.policy_stamp(self.state, 'explicit', require_epochs=True),
+                             policy.PolicyStamp('ON', 1, None))
+
+    def test_managed_install_stages_policy_epochs_without_overriding_preferences(self):
+        policy.initialize_state(self.state, 'off')
+        policy.apply_command(self.state, '/coding-team on', 'explicit')
+        before = self.state.read_bytes()
+        with ct_storage.locked(self.state):
+            payload = policy.prepare_initialization(self.state, repair_epochs=True)
+            self.assertEqual(self.state.read_bytes(), before)
+            ct_storage.atomic_write(self.state, payload)
+            self.assertEqual(policy.policy_stamp(self.state, 'explicit', require_epochs=True),
+                             policy.PolicyStamp('ON', 0, None))
+            self.assertEqual(policy.policy_stamp(self.state, 'other', require_epochs=True),
+                             policy.PolicyStamp('OFF', 0, 0))
+            self.assertIsNone(policy.prepare_initialization(self.state, repair_epochs=True))
+
     def test_chat_precedence_and_reset(self):
         policy.initialize_state(self.state)
         policy.apply_command(self.state, '/coding-team off', 'a')
@@ -119,6 +150,59 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(len(policy.HELP_LINES), 7)
         self.assertFalse(self.state.exists())
         self.assertFalse(self.state.parent.exists())
+
+    def install_legacy_epochs(self):
+        self.state.parent.mkdir()
+        self.state.write_text(json.dumps({
+            'schema_version': 1, 'global_policy': 'ON', 'chat_policies': {'fixed': 'ON'},
+            'updated_at': 'legacy',
+        }), encoding='utf-8')
+        with ct_storage.locked(self.state):
+            stamp = policy.policy_stamp(self.state, 'inherited')
+            policy.initialize_policy_epochs(self.state)
+        self.assertEqual(stamp, policy.PolicyStamp('ON', 0, 0))
+
+    def stamp(self, chat):
+        with ct_storage.locked(self.state):
+            return policy.policy_stamp(self.state, chat, require_epochs=True)
+
+    def test_policy_updates_preserve_original_shape(self):
+        self.install_legacy_epochs()
+        self.assertEqual(policy.apply_command(self.state, '/coding-team status', 'fixed'), {
+            'global_policy': 'ON', 'chat_id': 'fixed', 'chat_policy': 'ON', 'effective_policy': 'ON',
+        })
+        self.assertEqual(policy.load_state(self.state)['schema_version'], 1)
+        before = self.stamp('fixed')
+        policy.apply_command(self.state, '/coding-team off --global', None)
+        policy.apply_command(self.state, '/coding-team on --global', None)
+        self.assertEqual(self.stamp('fixed'), before)
+        self.assertEqual(self.stamp('inherited'), policy.PolicyStamp('ON', 0, 2))
+
+    def test_transient_off_fences_only_affected_owner(self):
+        self.install_legacy_epochs()
+        before = self.stamp('inherited')
+        unaffected = self.stamp('fixed')
+        policy.apply_command(self.state, '/coding-team off', 'inherited')
+        policy.apply_command(self.state, '/coding-team on', 'inherited')
+        self.assertEqual(self.stamp('inherited'), policy.PolicyStamp('ON', before.chat_epoch + 2, None))
+        self.assertEqual(self.stamp('fixed'), unaffected)
+        policy.apply_command(self.state, '/coding-team reset', 'inherited')
+        self.assertEqual(self.stamp('inherited'), policy.PolicyStamp('ON', 3, 0))
+
+    def test_legacy_writer_change_survives_native_updates_as_incompatible(self):
+        self.install_legacy_epochs()
+        state = policy.load_state(self.state)
+        state['global_policy'] = 'OFF'
+        state['updated_at'] = 'old-writer'
+        self.state.write_text(json.dumps(state), encoding='utf-8')
+        self.assertEqual(policy.apply_command(self.state, '/coding-team status', 'inherited')['effective_policy'], 'OFF')
+        policy.apply_command(self.state, '/coding-team on --global', None)
+        with self.assertRaises(policy.PolicyWriterIncompatible):
+            self.stamp('inherited')
+        with ct_storage.locked(self.state):
+            policy.repair_policy_epochs(self.state)
+        self.assertEqual(self.stamp('inherited').effective, 'ON')
+        self.assertEqual(self.stamp('fixed').effective, 'ON')
 
     def test_missing_and_corrupt_state_fail_closed(self):
         for payload in (None, b'{broken', b'{}', b'[]',

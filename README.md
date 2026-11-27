@@ -6,6 +6,8 @@ A skill for proportionate delegation, coordinated implementation and independent
 
 This README is a guide for users, maintainers and reviewers. [SKILL.md](SKILL.md) is the operational entrypoint and its linked references define the workflow; the README adds no authority, approvals or competing rules. Licensed under [MIT](LICENSE).
 
+When a task needs separate Spec and Plan artifacts, use [adaptive planning](references/adaptive-planning.md): the Leader writes both, independent review is scoped to each artifact, and the reviewed Spec is approved before planning implementation. This process does not impose a fixed reviewer roster; runtime behavior remains platform-specific and instructions are ADVISORY.
+
 ## Install
 
 Requires Git and Python 3.11 or newer (standard library only). Installation is done by one CLI, `scripts/coding_team.py`, run from a source checkout. Clone the repository to a **source directory of your choice** (not into the skill directory itself): `install` copies the skill, the rendered role agents and the platform config into the platform's own locations, transactionally, with backups and a SHA-256 manifest.
@@ -14,7 +16,7 @@ Always preview first: `install --dry-run` lists every path it would write, back 
 
 - `--default on|off` sets the global ON/OFF default (state is user-level). Without it, existing state is kept; a new state starts ON.
 - A user-scope install writes the rules block by default, so the Leader uses coding-team automatically on Claude Code, Codex and Antigravity; pass `--no-global-rules` to skip it. The block (`--global-rules`, now the default) is a marked block (`<!-- coding-team-policy:start -->` ... `<!-- coding-team-policy:end -->`) into the platform's global rules file so the Leader handles `/coding-team` controls and routing even before selecting the skill. Bytes outside the markers are never changed. The block embeds the Python executable used at install time (`sys.executable`); re-run `install --global-rules` after changing or removing that Python or virtual environment. On Windows it carries both a PowerShell form and a Git Bash / POSIX form of each command.
-- `--scope project --project-dir DIR` installs only the skill and agents into one project, plus a lock file (`install.lock.lock`) under `<config_root>/coding-team/`, and a backup directory only when an existing file is replaced; no state file or rules file is touched. It cannot be combined with `--default` or an explicit `--global-rules` (project scope never writes rules); the ON/OFF state stays user-level. A project-only install therefore has no state file: `/coding-team on|off` (including `--global`) fail until a user-scope install has run.
+- `--scope project --project-dir DIR` installs the skill and agents into one project. It uses the user-level install lock and backups. Codex also registers the project manifest beside the user-level policy file. Project scope cannot be combined with `--default` or an explicit `--global-rules`. Run a user-scope install to initialize the policy file for `/coding-team on|off`, including `--global`.
 
 Every CLI call prints exactly one JSON object; exit 0 = success, 1 = valid but negative, 2 = error or conflict. Start a fresh chat after installing so the platform loads the new skill and agents. The examples use `python`; use your actual interpreter (for example `python3`), and in PowerShell quote paths with spaces and use the call operator (`& 'C:\path\python.exe' 'C:\src\coding-team\scripts\coding_team.py' ...`).
 
@@ -49,6 +51,20 @@ python ~/src/coding-team/scripts/coding_team.py install --platform codex --defau
 
 On Codex the commands may also be written with the `$coding-team` prefix. The installed `agents/openai.yaml` keeps implicit invocation enabled; leave it that way so the ON/OFF controls stay reachable while coding-team is OFF. Codex role files carry no model (`static_agent_model: omit`): the Leader passes the tier's model at spawn, because a model in the agent TOML would win over it.
 
+#### Antigravity Desktop worker on Windows
+
+Install the separate worker skill into Antigravity Desktop. Open the same Git worktree in both apps. Antigravity uses the account, model and permissions selected in its own app.
+
+```sh
+python ~/src/coding-team/scripts/coding_team.py install --platform antigravity --desktop-worker --dry-run
+python ~/src/coding-team/scripts/coding_team.py install --platform antigravity --desktop-worker
+```
+
+1. In the Codex chat you want as Leader, send `/coding-team agy auto on`. Codex selects that chat and opens an invitation for the active worktree.
+2. In the Antigravity chat on the same worktree, send `/coding-team listen`. Codex reports when the chat is paired and its listener is ready. The worker receives later corrections in that same chat.
+
+Use `/coding-team agy on` for manual delivery on first activation, or `/coding-team agy auto off` to select manual delivery explicitly. In either app, `/coding-team status` shows the current role and connection, and `/coding-team help` lists the commands. Each worktree has one inter-app Leader. To move the role, use the intended activation command in the new Codex chat after the current coordination round closes. Follow the [Desktop worker guide](references/antigravity-desktop.md) for readiness, result collection and recovery.
+
 ### Antigravity
 
 Installs under `~/.gemini`: skill in `config/skills/coding-team`, agents in `config/agents`, rules block in `config/rules/coding-team-policy.md`, state in `antigravity/coding-team/state.json`.
@@ -61,7 +77,7 @@ python ~/src/coding-team/scripts/coding_team.py install --platform antigravity -
 
 ### Runtime-only package
 
-Instead of installing from a full clone, a maintainer can build a smaller ZIP with `python scripts/build_runtime_package.py [--platform P] --output ../coding-team.zip`. It contains `LICENSE`, `SKILL.md`, `agents`, `platforms` (only `platforms/P.json` with `--platform`), `references` and `scripts`, plus a hash manifest, under `coding-team/`. Extract it into a staging directory and run the same `install` commands with the extracted `coding-team/scripts/coding_team.py`. A package built with `--platform P` can install only platform P; installing another platform from it fails because `platforms/<other>.json` is missing. See [runtime packaging](CONTRIBUTING.md#runtime-only-installation-package).
+Instead of installing from a full clone, a maintainer can build a smaller ZIP with `python scripts/build_runtime_package.py [--platform P] --output ../coding-team.zip`. It contains `LICENSE`, `SKILL.md`, `agents`, `platforms`, `references` and `scripts`, plus a hash manifest, under `coding-team/`. The full package and the Antigravity package also include the separate Desktop worker skill. Extract the ZIP and run `install` from the extracted `coding-team/scripts/coding_team.py`. Use the full package or the corresponding platform package to install each app's component. See [runtime packaging](CONTRIBUTING.md#runtime-only-installation-package).
 
 ### Conflicts, recovery and uninstall
 
@@ -174,11 +190,13 @@ This table is filled only from a published smoke record, `evaluations/<date>-pla
 | [SKILL.md](SKILL.md) | Entry point: routing, levels, modes, roles and essential gates |
 | [orchestration.md](references/orchestration.md) | Orchestrator routing, ownership state, handoff and tokens |
 | [workflow.md](references/workflow.md) | Work selection, dependencies, ownership and integration |
+| [adaptive-planning.md](references/adaptive-planning.md) | Scoped Spec and Plan review and approval sequence |
 | [agent-contracts.md](references/agent-contracts.md) | Roles, actual guarantees and handoff contents |
 | [model-routing.md](references/model-routing.md) | Preferred Tier, Requested Model, Effective Model |
 | [debate-governance.md](references/debate-governance.md) | Issues, evidence, counters, termination and approvals |
 | [quality-safety.md](references/quality-safety.md) | Verification, recovery and accurate reporting |
 | [control-policy.md](references/control-policy.md) | Commands, state, chat identity and the CLI |
+| [antigravity-desktop.md](references/antigravity-desktop.md) | Pairing, handoff and the native representative |
 | [task-ledger.md](references/task-ledger.md) | Optional durable task records and readiness |
 | [governance-defaults.json](references/governance-defaults.json) | Single source of numeric defaults |
 | [roles.json](agents/roles/roles.json) | Role capabilities; contracts in `agents/roles/ct-*.md` |

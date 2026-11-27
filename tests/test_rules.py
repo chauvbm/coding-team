@@ -105,6 +105,25 @@ class RulesTests(unittest.TestCase):
         order = [text.index(f'\n{n}. ') for n in range(1, 7)]
         self.assertEqual(order, sorted(order))
 
+    def test_adaptive_review_precedes_approval(self):
+        text = self.block(platform='antigravity-cli')
+        self.assertIn((self.root / 'skill' / 'references/adaptive-planning.md').as_posix(), text)
+        self.assertIn('Leader personally writes and revises both', text)
+        self.assertLess(text.index('reviewers for each artifact'), text.index('approve the Spec'))
+        self.assertLess(text.index('approve the Spec'), text.index('drafting the Plan'))
+        self.assertLess(text.index('review the Plan'), text.index('Plan approval'))
+        self.assertLess(text.index('Plan approval'), text.index('implementation'))
+        self.assertIn('direct work or a checklist', text)
+        self.assertIn('OFF', text)
+        self.assertIn('SOLO', text)
+
+    def test_formal_work_routes_before_legacy_route(self):
+        text = self.block(platform='codex')
+        self.assertIn('When both artifacts are needed or an existing Spec/Plan pair is adopted', text)
+        self.assertLess(text.index('When both artifacts are needed'), text.index('Routing table'))
+        self.assertIn('references/adaptive-planning.md', text)
+        self.assertIn('FULL_TEAM', text)
+
     def test_shell_forms_and_labels(self):
         text = self.block()
         if os.name == 'nt':
@@ -118,6 +137,21 @@ class RulesTests(unittest.TestCase):
         else:
             self.assertNotIn('PowerShell', text)
             self.assertNotIn('& ', text.split('Chat id contract')[0])
+
+    @unittest.skipUnless(os.name == 'nt', 'inter-app Desktop setup on Windows')
+    def test_desktop_rules_route_canonical_controls_in_each_chat(self):
+        leader = self.block(platform='codex')
+        worker = self.block(platform='antigravity')
+
+        self.assertIn('/coding-team agy on|off', leader)
+        self.assertIn('/coding-team agy auto on|off', leader)
+        self.assertNotIn('/coding-team antigravity pair', leader)
+        for command in ('/coding-team listen', '/coding-team status', '/coding-team help'):
+            self.assertIn(command, worker)
+        self.assertIn('coding-team-desktop-worker', worker)
+        self.assertIn('ct_bridge_worker.py', worker)
+        self.assertIn('connection-status', worker)
+        self.assertNotIn('ct_bridge_worker.py', self.block(platform='claude-code'))
 
     @staticmethod
     def _forms(text):

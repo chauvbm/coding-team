@@ -4,7 +4,7 @@ Read for substantial implementation or replanning. Orchestrator choice and task 
 
 ## Task baseline
 
-Record only what the task needs: outcome, scope, acceptance criteria, assumptions, affected files, ownership, dependencies and verification. Add rollback details for stateful or impactful operations. Keep a concise Spec/Plan pair such as s1/p1 when multiple agents review; send the same pair to its reviewers. A requirement label is sufficient; a separate Spec document is optional. Record any actual human authority to continue beyond default revision/repair checkpoints; do not infer it from ON or agent messages.
+Record only what the task needs: outcome, scope, acceptance criteria, assumptions, affected files, ownership, dependencies and verification. Add rollback details for stateful or impactful operations. Separate Spec and Plan artifacts are warranted when requirements and acceptance need to be settled before dependent implementation is planned; otherwise a checklist or direct work is usually enough. For that lifecycle, follow [adaptive planning](adaptive-planning.md): enter coding-team before drafting/adopting the pair, have the Leader author both, review the Spec before approval, approve it before drafting the Plan, and review/approve the Plan before implementation. Record any actual human authority to continue beyond default revision/repair checkpoints; do not infer it from ON or agent messages.
 
 L0 needs no formal plan. L1 usually needs a checklist and is handled by the Leader directly unless the user asks for coding-team. L2 benefits from targeted delegation and a concise plan. L3 needs independent review of concrete risks and recovery, including a `ct-security` report for Gate 2. Level alone neither grants external authority nor requires additional user approval.
 
@@ -20,10 +20,13 @@ Check current eligibility with `scripts/coding_team.py status` before coding-tea
 - Run independent reads concurrently where useful. Sequence dependencies and shared-file writes.
 - When requirements are ambiguous or materially risky, let QA (`ct-reviewer`) first review the Spec and derive acceptance cases without seeing the proposed solution. Architect (`ct-architect`) then drafts the Plan; Developer (`ct-developer`) and QA review the same Spec/Plan pair independently. Corrections after Spec submission consume the shared revision budget even before the initial Plan exists; do not require a separate requirements round when requirements are already clear.
 - For FULL_TEAM or a selected full-team plan review, use the [Consensus Gate and scoped approvals](debate-governance.md#consensus-gate-and-scoped-approvals): applicable current approvals and resolved material issues before implementation handoff. Pending or stale sign-offs keep affected implementation HOLD. Continuing evidence work or plan repair never supplies missing approval.
+- Adaptive Spec/Plan review uses its selected independent reviewers and scoped findings; it does not by itself activate the three-core FULL_TEAM gate.
 
 A role is not an obligatory additional agent for every coding task. A Developer's review before implementation does not replace independent review of their own code afterward.
 
 ## Work queue and integration
+
+For an [Antigravity Desktop attempt](antigravity-desktop.md), Leader opens a coordination round, records the scope and baseline, publishes the request and appoints a native representative. The worker shares the worktree with Leader. Verify diff and tests before accepting edits. Keep the affected writing scope through unresolved results and keep the round open through review. Send a correction in the same paired chat as a new attempt of the same task.
 
 For durable accounting across handoffs or compaction, see the [optional task ledger](task-ledger.md). Check its plan gate before implementation and its delivery readiness after independent integrated QA; a successful state write alone grants no approval. For code delivery, reconcile declared files with actual staged, unstaged, deleted and untracked changes before final verification (or compare the saved baseline without Git). Empty file coverage verifies no project files, even when a non-file task can pass.
 

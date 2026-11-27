@@ -5,8 +5,8 @@ roll back automatically, a killed process leaves the journal for `recover`.
 """
 from __future__ import annotations
 
-from contextlib import nullcontext
-from dataclasses import dataclass, field
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -25,7 +25,13 @@ from ct_storage import LinkedPathError, atomic_write, locked, reject_links
 MANIFEST_NAME = 'install-manifest.json'
 LOCK_TIMEOUT = 30
 ROOT_LABELS = ('skill_dir', 'agents_dir')
-_EXCLUDED_SCRIPTS = {'export_evaluation_inputs.py', 'build_runtime_package.py'}
+_RETIRED_SCRIPTS = {'ct_antigravity.py', 'ct_winjob.py', 'ct_external.py',
+                    'ct_external_store.py', 'ct_external_workspace.py'}
+_EXCLUDED_SCRIPTS = {'export_evaluation_inputs.py', 'build_runtime_package.py'} | _RETIRED_SCRIPTS
+_WORKER_SCRIPTS = ('ct_bridge_worker.py', 'ct_bridge_files.py', 'ct_bridge_store.py',
+                   'ct_bridge_binding.py', 'ct_bridge_control.py', 'ct_bridge_attempts.py',
+                   'ct_bridge_install.py', 'ct_bridge_commands.py', 'ct_storage.py',
+                   'ct_platform.py', 'ct_policy.py')
 _SHA = re.compile(r'[0-9a-f]{64}')
 _RECOVER_HINT = 'run `coding_team.py install --recover`'
 
@@ -159,9 +165,20 @@ def _linked(paths_list, paths):
     return found
 
 
-def _resolve_paths(cfg, scope, env, home, project_dir):
+def _resolve_paths(cfg, scope, env, home, project_dir, desktop_worker=False):
     paths = dict(target_paths(cfg, scope, env, home, project_dir))
     paths['config_root'] = resolve_config_root(cfg, env, Path(home))
+    if desktop_worker:
+        if cfg['platform'] != 'antigravity':
+            raise ValueError('--desktop-worker requires --platform antigravity')
+        skill = Path(paths['skill_dir']).with_name('coding-team-desktop-worker')
+        state_root = Path(paths['state_file']).parent.with_name('coding-team-desktop-worker')
+        paths.update(skill_dir=skill, agents_dir=skill, global_rules_file=None,
+                     state_file=state_root / 'state.json', backup_root=state_root / 'backups',
+                     lock_file=state_root / 'install.lock', journal_file=state_root / 'install-journal.json',
+                     managed_roots=[skill, state_root], bridge_component='worker')
+    elif cfg['platform'] == 'codex':
+        paths['bridge_component'] = 'leader'
     return paths
 
 
@@ -258,7 +275,8 @@ def _skill_files(source_root, cfg):
     rels = ['SKILL.md', 'LICENSE']
     for sub in ('references', 'agents/roles'):
         rels += sorted(p.relative_to(root).as_posix() for p in (root / sub).rglob('*')
-                       if p.is_file() and '__pycache__' not in p.parts)
+                       if p.is_file() and '__pycache__' not in p.parts
+                       and p.relative_to(root).as_posix() != 'references/antigravity-cli.md')
     rels += sorted(f'scripts/{p.name}' for p in (root / 'scripts').glob('*.py')
                    if p.is_file() and p.name not in _EXCLUDED_SCRIPTS)
     if cfg['platform'] == 'codex':
@@ -274,16 +292,26 @@ def _skill_files(source_root, cfg):
 
 
 def build_plan(source_root, cfg, *, scope, env, home, project_dir=None, default=None,
-               global_rules=False, python=None, docs_mcp=()) -> InstallPlan:
+               global_rules=False, python=None, docs_mcp=(), desktop_worker=False) -> InstallPlan:
     docs_mcp = list(docs_mcp or ())
+    if desktop_worker and (default is not None or global_rules or docs_mcp):
+        raise ValueError('--desktop-worker cannot manage native policy, rules or docs MCP')
     if scope == 'project' and (default is not None or global_rules):
         raise ValueError('--scope project cannot be combined with --default or --global-rules')
     if docs_mcp and cfg['platform'] != 'claude-code':
         raise ValueError('--docs-mcp is only supported on claude-code')
     if default is not None and str(default).upper() not in ('ON', 'OFF'):
         raise ValueError('default must be on or off')
-    paths = _resolve_paths(cfg, scope, env, home, project_dir)
+    paths = _resolve_paths(cfg, scope, env, home, project_dir, desktop_worker)
     source_root = Path(source_root)
+    if desktop_worker:
+        resources = [('SKILL.md', source_root / 'workers/antigravity/SKILL.md'),
+                     ('LICENSE', source_root / 'LICENSE')]
+        resources += [('scripts/' + name, source_root / 'scripts' / name) for name in _WORKER_SCRIPTS]
+        resources.append(('platforms/antigravity.json', source_root / 'platforms/antigravity.json'))
+        files = [('skill_dir', rel, path.read_bytes().replace(b'\r\n', b'\n'))
+                 for rel, path in resources]
+        return InstallPlan(cfg['platform'], scope, paths, files, options={'desktop_worker': True})
     roles = load_roles(source_root / 'agents' / 'roles')
     agents = render_all(roles, cfg, {'docs_lookup': docs_mcp} if docs_mcp else None)
     files = [('skill_dir', rel, data) for rel, data in _skill_files(source_root, cfg)]
@@ -331,6 +359,23 @@ def _check_identity(manifest, platform, scope, skill_dir):
                          f'({manifest["scope"]} scope) installation; uninstall it first')
 
 
+def _bridge_binding(paths):
+    result = {'bridge_abi': 1, 'component': paths['bridge_component'],
+              'install_lock': Path(paths['lock_file']).resolve().as_posix()}
+    if paths['bridge_component'] == 'leader':
+        result['state_path'] = Path(paths['state_file']).resolve().as_posix()
+    return result
+
+
+def _check_bridge_binding(record, paths):
+    if 'bridge_component' in paths and record:
+        expected = _bridge_binding(paths)
+        # Legacy manifests may have state/lock bindings but no Desktop ABI yet.
+        if any(key in record and record[key] != value for key, value in expected.items()):
+            raise ValueError('installation is bound to a different Codex policy state or install lock '
+                             'or Desktop component; use the existing installation configuration')
+
+
 def _journal_guard(paths):
     if Path(paths['journal_file']).exists():
         raise IncompleteTransactionError(
@@ -345,6 +390,7 @@ def _assess(plan):
     manifest = _load_manifest(skill_dir)
     if manifest:
         _check_identity(manifest, plan.platform, plan.scope, skill_dir)
+        _check_bridge_binding(manifest, paths)
     known = manifest['files'] if manifest else {}
     r = {'targets': [], 'written': [], 'unchanged': [], 'removed_stale': [], 'kept_modified_stale': [],
          'modified_overwritten': [], 'replaced_unmanaged': [], 'state_change': False,
@@ -408,16 +454,25 @@ def _assess(plan):
             rules_file, created = _posix(path), old is None
     r['rules_file'] = rules_file
 
-    if plan.scope == 'user' and not linked(paths['state_file']):
+    leader = paths.get('bridge_component') == 'leader'
+    manages_state = paths.get('bridge_component') != 'worker' and (
+        plan.scope == 'user' or (leader and Path(paths['state_file']).exists()))
+    if manages_state and not linked(paths['state_file']):
         state_path = Path(paths['state_file'])
         old = _read(state_path)
-        if old is not None:
-            state = ct_policy.load_state(state_path)  # corrupt state fails before any write
-        default = plan.state_default
-        if old is None or (default is not None and state['global_policy'] != default.upper()):
-            r['state_change'] = True
-            r['targets'].append(_Target(state_path, None, old, f'state/{state_path.name}',
-                                        lambda: ct_policy.initialize_state(state_path, default)))
+        if leader:
+            payload = ct_policy.prepare_initialization(state_path, plan.state_default, repair_epochs=True)
+            if payload is not None:
+                r['state_change'] = True
+                r['targets'].append(_Target(state_path, payload, old, f'state/{state_path.name}'))
+        else:
+            if old is not None:
+                state = ct_policy.load_state(state_path)
+            default = plan.state_default
+            if old is None or (default is not None and state['global_policy'] != default.upper()):
+                r['state_change'] = True
+                r['targets'].append(_Target(state_path, None, old, f'state/{state_path.name}',
+                                            lambda: ct_policy.initialize_state(state_path, default)))
 
     manifest_path = skill_dir / MANIFEST_NAME
     created_dirs = set(manifest['created_dirs']) if manifest else set()
@@ -428,6 +483,8 @@ def _assess(plan):
                'installed_at': manifest['installed_at'] if manifest else None,
                'options': plan.options, 'files': new_files, 'rules_file': rules_file,
                'rules_file_created': created, 'created_dirs': sorted(created_dirs)}
+    if 'bridge_component' in paths:
+        content.update(_bridge_binding(paths))
     file_change = any(t.action is None for t in r['targets'])
     if file_change or content != manifest:
         content['installed_at'] = _now()
@@ -482,6 +539,27 @@ def _verify_backups(entries, backup_root):
     return bad
 
 
+def _restore_entry(entry):
+    path = Path(entry['path'])
+    current = _read(path)
+    ours = (current is not None and entry.get('new_sha256') is not None
+            and _sha(current) == entry['new_sha256'])
+    if entry['existed']:
+        data = Path(entry['backup']).read_bytes()
+        if current == data:
+            return None
+        if current is not None and not ours:
+            return 'kept'
+        atomic_write(path, data)
+        return 'restored'
+    if current is not None:
+        if not ours:
+            return 'kept'
+        path.unlink()
+        return 'deleted'
+    return None
+
+
 def _restore(entries, created_dirs, paths, kept_links=None):
     """Undo journaled targets (newest first).
 
@@ -492,27 +570,12 @@ def _restore(entries, created_dirs, paths, kept_links=None):
     Returns (restored, deleted_new, kept_unexpected, failed).
     """
     restored, deleted, kept, failed = [], [], [], []
+    outputs = {'restored': restored, 'deleted': deleted, 'kept': kept}
     for entry in reversed(entries):
-        path = Path(entry['path'])
         try:
-            current = _read(path)
-            ours = (current is not None and entry.get('new_sha256') is not None
-                    and _sha(current) == entry['new_sha256'])
-            if entry['existed']:
-                data = Path(entry['backup']).read_bytes()
-                if current == data:
-                    continue
-                if current is not None and not ours:
-                    kept.append(entry['path'])
-                    continue
-                atomic_write(path, data)
-                restored.append(entry['path'])
-            elif current is not None:
-                if not ours:
-                    kept.append(entry['path'])
-                    continue
-                path.unlink()
-                deleted.append(entry['path'])
+            result = _restore_entry(entry)
+            if result is not None:
+                outputs[result].append(entry['path'])
         except Exception:  # keep going; the journal stays for a later recover
             failed.append(entry['path'])
     for directory in sorted(created_dirs, key=lambda d: len(Path(d).parts), reverse=True):
@@ -526,8 +589,28 @@ def _discard_staging(staging, backup_root):
     _rmdir_if_empty(backup_root)
 
 
-def _transaction(paths, operation, platform, scope, targets, created_dirs, cleanup=None):
+@contextmanager
+def _component_lock(paths):
+    """Keep native policy fenced through assessment, staging, publication and undo."""
+    with locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
+        if paths.get('bridge_component') == 'leader':
+            _check_links([paths['state_file'], _lock_path(paths['state_file'])], paths)
+            with locked(paths['state_file'], timeout=LOCK_TIMEOUT):
+                yield
+        else:
+            yield
+
+
+def _desktop_guard(paths):
+    if 'bridge_component' in paths:
+        from ct_bridge_install import guard
+        guard(Path(paths['lock_file']))
+
+
+def _transaction(paths, operation, platform, scope, targets, created_dirs, cleanup=None, *, default=None):
     """Stage, back up, journal and apply targets; roll back on Exception. Returns backup dir."""
+    if not targets:
+        return None
     backup_root = Path(paths['backup_root'])
     journal_path = Path(paths['journal_file'])
     stamp = _stamp(backup_root)
@@ -552,19 +635,18 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
         journal = {'schema_version': 1, 'operation': operation, 'platform': platform, 'scope': scope,
                    'started_at': _now(), 'backup_dir': backup_dir and _posix(backup_dir),
                    'staging_dir': _posix(staging), 'created_dirs': created_dirs, 'targets': entries}
+        if 'bridge_component' in paths:
+            journal.update(_bridge_binding(paths))
         atomic_write(journal_path, _json_bytes(journal))
         for target, entry in zip(targets, entries):
-            # Compare-before-write: the backup holds what _assess read. If the target changed
-            # since (another editor, a user), abort before touching it; rollback then undoes
-            # the earlier targets and this one keeps the user's bytes.
+            # Compare with the bytes backed up before touching this target.
             if _read(target.path) != target.old:
                 raise ModifiedTargetError('target changed while the transaction was running; '
                                           'it was left as is', [_posix(target.path)])
             started += 1
             if target.action is not None:
                 target.action()
-                # The action's bytes are only known now; journal them so a rollback or
-                # recover may undo them (until then they are treated as unexpected and kept).
+                # Legacy platform actions only expose their written bytes after the write.
                 after = _read(target.path)
                 entry['new_sha256'] = None if after is None else _sha(after)
                 atomic_write(journal_path, _json_bytes(journal))
@@ -600,11 +682,20 @@ def _transaction(paths, operation, platform, scope, targets, created_dirs, clean
     return backup_dir and _posix(backup_dir)
 
 
+def _lock_path(path):
+    return Path(str(path) + '.lock')
+
+
 def _infra_paths(paths, *, rules=False, state=False):
-    """Paths a transaction touches besides plan files; rules/state only when written (R7)."""
-    items = [paths['lock_file'], paths['journal_file'], paths['backup_root'],
-             Path(paths['skill_dir']) / MANIFEST_NAME]
-    if state:
+    """Paths touched by this component; native state only belongs to a Leader."""
+    items = [paths['lock_file'], _lock_path(paths['lock_file']), paths['journal_file'],
+             paths['backup_root'], Path(paths['skill_dir']) / MANIFEST_NAME]
+    if paths.get('bridge_component') == 'leader':
+        items += [paths['state_file'], _lock_path(paths['state_file']),
+                  Path(paths['lock_file']).parent / 'bridge-worktrees.json']
+    elif paths.get('bridge_component') == 'worker':
+        items.append(Path(paths['lock_file']).parent / 'bridge-worktrees.json')
+    elif state:
         items.append(paths['state_file'])
     if rules and paths['global_rules_file'] is not None:
         items.append(paths['global_rules_file'])
@@ -621,7 +712,7 @@ def apply_plan(plan, *, dry_run, replace_unmanaged=False, overwrite_modified=Fal
         return dict(preview(plan), dry_run=True)
     paths = plan.paths
     _check_links(_plan_link_set(plan), paths)
-    with locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
+    with _component_lock(paths):
         _check_links(_plan_link_set(plan), paths)
         _journal_guard(paths)
         r = _assess(plan)
@@ -644,10 +735,11 @@ def apply_plan(plan, *, dry_run, replace_unmanaged=False, overwrite_modified=Fal
                     root = label_roots[target.label.split('/', 1)[0]]
                     _prune(target.path.parent, root, include_root=False)
 
+            _desktop_guard(paths)
             backup_dir = _transaction(paths, 'install', plan.platform, plan.scope, r['targets'],
-                                      r['created_dirs'], cleanup)
+                                      r['created_dirs'], cleanup, default=plan.state_default)
         state = None
-        if plan.scope == 'user':
+        if plan.scope == 'user' and paths.get('bridge_component') != 'worker':
             state = ct_policy.load_state(paths['state_file'])
     return {'dry_run': False, 'written': r['written'], 'unchanged': r['unchanged'],
             'removed_stale': r['removed_stale'], 'kept_modified_stale': r['kept_modified_stale'],
@@ -677,16 +769,28 @@ def _load_journal(path):
     return journal
 
 
-def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
+def recover(cfg, *, scope, env, home, project_dir=None, desktop_worker=False) -> dict:
     """Restore every journaled target from verified backups, then drop journal and staging."""
-    paths = _resolve_paths(cfg, scope, env, home, project_dir)
+    paths = _resolve_paths(cfg, scope, env, home, project_dir, desktop_worker)
     roots, journal_path = paths['managed_roots'], Path(paths['journal_file'])
     _check_links(_infra_paths(paths), paths)
-    with locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
+    with _component_lock(paths):
+        _check_links(_infra_paths(paths), paths)
+        if 'bridge_component' in paths:
+            try:
+                current_manifest = _load_manifest(paths['skill_dir'])
+            except ValueError:
+                # A recovery journal can repair a manifest whose current bytes are unreadable.
+                current_manifest = None
+            _check_bridge_binding(current_manifest, paths)
         if not journal_path.exists():
             return {'restored': [], 'deleted_new': [], 'kept_unexpected': [], 'kept_links': [],
                     'journal_removed': False, 'backup_dir': None}
         journal = _load_journal(journal_path)
+        _check_bridge_binding(journal, paths)
+        if (journal.get('platform'), journal.get('scope')) != (cfg['platform'], scope):
+            raise RecoveryUnsafeError('journal belongs to a different platform or scope; '
+                                      'rerun with the matching --platform/--scope/--project-dir', [journal_path])
         entries = journal['targets']
         outside = [e['path'] for e in entries if not any(_inside(e['path'], r) for r in roots)]
         if outside:
@@ -697,10 +801,12 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
         if bad:
             raise RecoveryUnsafeError('backups are missing or do not match the journal; nothing restored', bad)
         links = []
+        _desktop_guard(paths)
         restored, deleted, unexpected, failed = _restore(entries, journal['created_dirs'], paths, links)
         if failed:
             raise IncompleteTransactionError(f'recovery incomplete; journal kept; {_RECOVER_HINT} again',
                                              failed)
+        # The journal blocks Desktop admission until restoration finishes under this lock.
         journal_path.unlink()
         staging = journal.get('staging_dir')
         if (isinstance(staging, str) and _inside(staging, paths['backup_root'])
@@ -712,18 +818,21 @@ def recover(cfg, *, scope, env, home, project_dir=None) -> dict:
 
 # --- uninstall -----------------------------------------------------------------------------
 
-def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_modified=False) -> dict:
-    paths = _resolve_paths(cfg, scope, env, home, project_dir)
+def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_modified=False,
+              desktop_worker=False) -> dict:
+    paths = _resolve_paths(cfg, scope, env, home, project_dir, desktop_worker)
     skill_dir = Path(paths['skill_dir'])
     if not dry_run:
         _check_links(_infra_paths(paths), paths)
-    with nullcontext() if dry_run else locked(paths['lock_file'], timeout=LOCK_TIMEOUT):
+    with nullcontext() if dry_run else _component_lock(paths):
         if not dry_run:
+            _check_links(_infra_paths(paths), paths)
             _journal_guard(paths)
         manifest = _load_manifest(skill_dir)
         if manifest is None:
             raise ValueError(f'not a coding-team managed installation: {_posix(skill_dir)}')
         _check_identity(manifest, cfg['platform'], scope, skill_dir)
+        _check_bridge_binding(manifest, paths)
         targets, removed, kept, missing = [], [], [], []
         kept_files = {label: {} for label in ROOT_LABELS}
         for label in ROOT_LABELS:
@@ -756,7 +865,9 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
         if kept:
             reduced = dict(manifest, files=kept_files, rules_file=None, rules_file_created=False)
             reduced = _json_bytes(reduced)
-        targets.append(_Target(manifest_path, reduced, _read(manifest_path), f'skill_dir/{MANIFEST_NAME}'))
+        old = _read(manifest_path)
+        if old != reduced:
+            targets.append(_Target(manifest_path, reduced, old, f'skill_dir/{MANIFEST_NAME}'))
         created_dirs = sorted((d for d in manifest['created_dirs'] if _dir_allowed(d, paths)),
                               key=lambda d: len(Path(d).parts), reverse=True)
         result = {'dry_run': dry_run, 'removed': removed, 'kept_modified': kept, 'missing': missing,
@@ -775,5 +886,7 @@ def uninstall(cfg, *, scope, env, home, project_dir=None, dry_run=False, remove_
                 for directory in created_dirs:
                     _rmdir_if_empty(directory, result['kept_links'])
 
-        result['backup_dir'] = _transaction(paths, 'uninstall', cfg['platform'], scope, targets, [], cleanup)
+        if targets:
+            _desktop_guard(paths)
+            result['backup_dir'] = _transaction(paths, 'uninstall', cfg['platform'], scope, targets, [], cleanup)
     return result

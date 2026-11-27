@@ -20,9 +20,6 @@ def locked(path, timeout=5.0):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(str(path) + '.lock', 'a+b') as stream:
-        if os.fstat(stream.fileno()).st_size == 0:
-            stream.write(b'0')
-            stream.flush()
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -39,6 +36,10 @@ def locked(path, timeout=5.0):
                     raise TimeoutError('policy lock deadline exceeded')
                 time.sleep(0.02)
         try:
+            # Windows can lock past EOF. Initialize only while owning the range.
+            if os.fstat(stream.fileno()).st_size == 0:
+                stream.write(b'0')
+                stream.flush()
             yield
         finally:
             stream.seek(0)

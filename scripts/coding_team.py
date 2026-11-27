@@ -304,6 +304,10 @@ def doctor(cfg, *, scope, env, home, project_dir) -> dict:
         problems.append('global rules block ' + report['rules_block'])
     report['problems'] = problems
     report['healthy'] = not problems
+    if cfg['platform'] == 'codex':
+        from ct_bridge_cli import doctor_status
+
+        report['antigravity_desktop'] = doctor_status(skill_dir, project_dir or Path.cwd(), env, home)
     return report
 
 
@@ -327,12 +331,14 @@ def _parser():
     item.add_argument('--replace-unmanaged', action='store_true')
     item.add_argument('--overwrite-modified', action='store_true')
     item.add_argument('--recover', action='store_true')
+    item.add_argument('--desktop-worker', action='store_true')
 
     item = sub.add_parser('uninstall')
     item.add_argument('--platform', choices=PLATFORMS, required=True)
     scoped(item)
     item.add_argument('--dry-run', action='store_true')
     item.add_argument('--remove-modified', action='store_true')
+    item.add_argument('--desktop-worker', action='store_true')
 
     for name in ('status', 'command'):
         item = sub.add_parser(name)
@@ -341,6 +347,17 @@ def _parser():
         item.add_argument('--platform', choices=PLATFORMS)
         item.add_argument('--chat-id')
         item.add_argument('--state', type=Path)
+
+    from ct_bridge_cli import OPERATIONS
+
+    item = sub.add_parser('bridge')
+    item.add_argument('operation', choices=OPERATIONS)
+    item.add_argument('--platform', choices=PLATFORMS, required=True)
+    item.add_argument('--workspace', type=Path, required=True)
+    item.add_argument('--task-id')
+    item.add_argument('--attempt', type=int)
+    item.add_argument('--payload-stdin', action='store_true')
+    item.add_argument('--wait-seconds', type=int, default=0)
 
     item = sub.add_parser('doctor')
     item.add_argument('--platform', choices=PLATFORMS)
@@ -381,10 +398,14 @@ def _install(args, env, home):
                                            ('--overwrite-modified', args.overwrite_modified)) if value]
         if extra:
             raise CliError('--recover performs a real recovery and cannot be combined with '
-                           + ', '.join(extra) + '; only --platform, --scope and --project-dir apply')
-        return dict(ct_install.recover(cfg, **_context(args, env, home)), platform=cfg['platform']), 0
-    plan = ct_install.build_plan(SOURCE_ROOT, cfg, default=args.default, global_rules=(args.scope == 'user') if args.global_rules is None else args.global_rules,
-                                 python=sys.executable, docs_mcp=args.docs_mcp, **_context(args, env, home))
+                           + ', '.join(extra) + '; only --platform, --scope, --project-dir and --desktop-worker apply')
+        result = ct_install.recover(cfg, desktop_worker=args.desktop_worker, **_context(args, env, home))
+        return dict(result, platform=cfg['platform']), 0
+    default_rules = args.scope == 'user' and not args.desktop_worker
+    plan = ct_install.build_plan(SOURCE_ROOT, cfg, default=args.default,
+                                 global_rules=default_rules if args.global_rules is None else args.global_rules,
+                                 python=sys.executable, docs_mcp=args.docs_mcp, desktop_worker=args.desktop_worker,
+                                 **_context(args, env, home))
     result = ct_install.apply_plan(plan, dry_run=args.dry_run, replace_unmanaged=args.replace_unmanaged,
                                    overwrite_modified=args.overwrite_modified)
     return dict(result, platform=cfg['platform'], scope=args.scope), 0
@@ -393,19 +414,48 @@ def _install(args, env, home):
 def _uninstall(args, env, home):
     cfg = _config(args.platform)
     result = ct_install.uninstall(cfg, dry_run=args.dry_run, remove_modified=args.remove_modified,
+                                  desktop_worker=args.desktop_worker,
                                   **_context(args, env, home))
     return dict(result, platform=cfg['platform'], scope=args.scope), 0
 
 
 def _policy(args, env, home):
     cfg = _config(resolve_platform(args.platform, env))
+    public = None
+    if args.action == 'command':
+        from ct_bridge_cli import command, is_bridge_control
+        from ct_bridge_commands import help_view, is_public_family, parse_public
+
+        public = parse_public(args.text)
+        if public == (None, 'help'):
+            return help_view(cfg['platform'], 'native'), 0
+        if public == (None, 'listen'):
+            return {'ok': False, 'state': 'NOT_READY', 'reason': 'WORKER_REQUIRED',
+                    'next_action': 'Install the managed Antigravity desktop worker, then /coding-team listen'}, 1
+        if is_public_family(args.text) or is_bridge_control(args.text):
+            return command(args, SOURCE_ROOT, cfg['platform'], env, home)
     state = args.state or target_paths(cfg, 'user', env, home, None)['state_file']
     chat_id = args.chat_id if args.chat_id is not None else chat_id_from_env(cfg, env)
+    if public == (None, 'status'):
+        from ct_bridge_cli import connection_view
+
+        inter_app = connection_view(cfg['platform'], SOURCE_ROOT, env, home)
+        try:
+            result = ct_policy.describe(ct_policy.load_state(state), chat_id)
+        except Exception as error:
+            return dict(_error(error, args.action), inter_app=inter_app), 2
+        return dict(result, platform=cfg['platform'], state_path=Path(state).as_posix(), inter_app=inter_app), 0
     if args.action == 'status':
         result = ct_policy.describe(ct_policy.load_state(state), chat_id)
     else:
         result = ct_policy.apply_command(state, args.text, chat_id)
     return dict(result, platform=cfg['platform'], state_path=Path(state).as_posix()), 0
+
+
+def _bridge(args, env, home):
+    from ct_bridge_cli import bridge_command
+
+    return bridge_command(args, SOURCE_ROOT, env, home, sys.stdin.buffer)
 
 
 def _doctor(args, env, home):
@@ -481,10 +531,13 @@ def _orchestrator(args, env, home):
 
 
 HANDLERS = {'install': _install, 'uninstall': _uninstall, 'status': _policy, 'command': _policy,
-            'doctor': _doctor, 'check-config': _check_config, 'orchestrator': _orchestrator}
+            'doctor': _doctor, 'check-config': _check_config, 'orchestrator': _orchestrator,
+            'bridge': _bridge}
 
 
 def _error(error, action):
+    if action == 'bridge':
+        return {'ok': False, 'state': 'NOT_READY', 'reason': 'INVALID_BRIDGE_COMMAND'}
     result: dict[str, object] = {'error': str(error), 'error_type': type(error).__name__}
     paths = getattr(error, 'paths', None)
     if paths:

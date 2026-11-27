@@ -1,7 +1,10 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -17,7 +20,7 @@ class RuntimePackageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / 'source'
+        self.root = Path(self.temp.name).resolve() / 'source'
         self.root.mkdir()
         for name in ('LICENSE', 'SKILL.md'):
             (self.root / name).write_bytes(b'example\r\n')
@@ -59,6 +62,81 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertIn('coding-team/scripts/marker.txt', names)
         self.assertNotIn('platforms/a.json', manifest['files'])
         self.assertEqual(manifest['platform'], 'b')
+
+    def test_worker_source_is_available_only_in_full_or_antigravity_packages(self):
+        worker = self.root / 'workers/antigravity/SKILL.md'
+        worker.parent.mkdir(parents=True)
+        worker.write_bytes(b'worker instructions\r\n')
+        (self.root / 'platforms/codex.json').write_text('{}')
+        (self.root / 'platforms/antigravity.json').write_text('{}')
+        for platform in (None, 'codex', 'antigravity'):
+            with self.subTest(platform=platform):
+                output = self.root.parent / ((platform or 'all') + '.zip')
+                builder.build_package(self.root, output, platform)
+                with zipfile.ZipFile(output) as archive:
+                    manifest = json.loads(archive.read('coding-team/runtime-package.json'))
+                    self.assertEqual('workers/antigravity/SKILL.md' in manifest['files'],
+                                     platform in (None, 'antigravity'))
+                    if platform in (None, 'antigravity'):
+                        self.assertEqual(archive.read('coding-team/workers/antigravity/SKILL.md'),
+                                         b'worker instructions\n')
+
+    def test_retired_cli_resources_are_not_distributed(self):
+        (self.root / 'scripts/ct_external.py').write_bytes(b'retired')
+        (self.root / 'references/antigravity-cli.md').write_bytes(b'retired')
+        builder.build_package(self.root, self.out)
+        with zipfile.ZipFile(self.out) as archive:
+            self.assertNotIn('coding-team/scripts/ct_external.py', archive.namelist())
+            self.assertNotIn('coding-team/references/antigravity-cli.md', archive.namelist())
+
+    def test_release_packages_install_native_and_desktop_components(self):
+        required = {'scripts/ct_bridge_install.py', 'scripts/ct_bridge_binding.py',
+                    'scripts/ct_bridge_store.py', 'scripts/ct_bridge_files.py',
+                    'scripts/ct_bridge_control.py', 'scripts/ct_bridge_attempts.py',
+                    'scripts/ct_bridge_cli.py'}
+        retired = {'scripts/ct_antigravity.py', 'scripts/ct_winjob.py', 'scripts/ct_external.py',
+                   'scripts/ct_external_store.py', 'scripts/ct_external_workspace.py',
+                   'references/antigravity-cli.md'}
+        for platform in (None, 'codex', 'antigravity', 'claude-code'):
+            with self.subTest(platform=platform):
+                root = self.root.parent / ('release-' + (platform or 'all'))
+                root.mkdir()
+                bundle = builder.build_package(SCRIPT.parents[1], root / 'runtime.zip', platform)
+                with zipfile.ZipFile(bundle) as archive:
+                    document = json.loads(archive.read('coding-team/runtime-package.json'))
+                    self.assertTrue(required <= document['files'].keys())
+                    self.assertFalse(retired & document['files'].keys())
+                    self.assertFalse({'tests', 'giai-doan1', 'evaluations', 'graphify-out'}
+                                     & {name.split('/', 1)[0] for name in document['files']})
+                    for name, metadata in document['files'].items():
+                        payload = archive.read('coding-team/' + name)
+                        self.assertEqual(hashlib.sha256(payload).hexdigest(), metadata['sha256'])
+                    archive.extractall(root / 'extracted')
+                home = root / 'home'
+                home.mkdir()
+                env = dict(os.environ, HOME=str(home), USERPROFILE=str(home),
+                           CODEX_HOME=str(home / '.codex'), PYTHONIOENCODING='utf-8')
+                for name in ('CLAUDE_CONFIG_DIR', 'GEMINI_CONFIG_DIR'):
+                    env.pop(name, None)
+                cli = root / 'extracted/coding-team/scripts/coding_team.py'
+                targets = ['codex', 'antigravity', 'claude-code'] if platform is None else [platform]
+                for target in targets:
+                    result = subprocess.run([sys.executable, str(cli), 'install', '--platform', target],
+                                            cwd=root, env=env, capture_output=True, text=True, timeout=45)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    installed = json.loads(Path(json.loads(result.stdout)['manifest']).read_bytes())
+                    if target == 'codex':
+                        self.assertEqual((installed['bridge_abi'], installed['component']), (1, 'leader'))
+                        self.assertEqual(installed['state_path'],
+                                         (home / '.codex/coding-team/state.json').as_posix())
+                    if target == 'antigravity':
+                        worker = subprocess.run([sys.executable, str(cli), 'install', '--platform', target,
+                                                 '--desktop-worker'], cwd=root, env=env,
+                                                capture_output=True, text=True, timeout=45)
+                        self.assertEqual(worker.returncode, 0, worker.stdout + worker.stderr)
+                        installed = json.loads(Path(json.loads(worker.stdout)['manifest']).read_bytes())
+                        self.assertEqual((installed['bridge_abi'], installed['component']), (1, 'worker'))
+                self.assertFalse((home / '.codex/coding-team/external').exists())
 
     def test_unknown_platform_rejected_before_output(self):
         for bad in ('c', '../a', ''):

@@ -7,6 +7,8 @@ description: "Handle /coding-team controls and coordinate substantial coding, de
 
 Use the smallest amount of coordination that improves the result. Leader owns scope, integration, verification and the final answer. Follow higher-priority instructions, project rules and the user's authorization; this skill adds no permissions.
 
+When the work needs separate Spec and Plan artifacts, or an existing pair is adopted, apply [adaptive planning](references/adaptive-planning.md) before drafting or presenting either artifact. Leader personally writes and revises both, selects independent reviewers for each artifact's actual questions, obtains user approval of the reviewed Spec before drafting the Plan, then obtains approval of the reviewed Plan before implementation. Small, clear work can use direct work or a checklist. The adaptive process does not impose a fixed reviewer roster or automatically select FULL_TEAM. Instructions remain ADVISORY; they do not enforce runtime approvals.
+
 ## Choose the orchestrator
 
 Each phase of a task has one primary orchestrator. Apply top to bottom, first match wins; an explicit user choice wins unless safety policy forbids it. Details, ownership and handoff: [orchestration](references/orchestration.md).
@@ -50,6 +52,10 @@ Do not change modes to evade a gate or stopping condition.
 Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `/coding-team status`, `on`, `off`, `on --global`, `off --global`, `reset`, `help` (see [control policy](references/control-policy.md)). Run `status` before applying coding-team and immediately before each dispatch; never reuse a cached ON after OFF. Chat policy overrides global; an explicit human task request overrides eligibility for that task only. Missing, corrupt or `UNKNOWN` state means no automatic dispatch. Controls never reset task history or waive gates.
 
 ## Roles and delegation
+
+If this installation offers an [external Desktop worker](references/control-policy.md#external-workers), handle its direct user controls with the installed `command` entry from the worktree. Check active Leader, native policy, opt-in, pairing and delivery readiness before assigning work. Open a coordination round before dispatch, and keep it open while reviewing a worker result. Follow the platform guide for the native representative, repeated corrections and recovery.
+
+For direct `/coding-team status`, `/coding-team help` or `/coding-team listen`, check the [external worker routing](references/control-policy.md#external-workers) before responding. If this chat is the Desktop worker, follow its installed worker skill for these commands. Handle native policy changes with the native command entry.
 
 | Role | Purpose | Ledger role |
 | --- | --- | --- |
