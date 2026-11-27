@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   unittest:
-    timeout-minutes: 10
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 10 }}
     strategy:
       fail-fast: false
       matrix:
