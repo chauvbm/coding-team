@@ -84,6 +84,27 @@ class StorageTests(unittest.TestCase):
             pass
         self.assertTrue(Path(str(self.state) + '.lock').exists())
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows byte-range locks')
+    def test_empty_lock_file_is_initialized_only_after_acquisition(self):
+        import msvcrt
+
+        lock_file = self.state.with_name(self.state.name + '.lock')
+        lock_file.parent.mkdir()
+        with lock_file.open('a+b') as owner:
+            msvcrt.locking(owner.fileno(), msvcrt.LK_NBLCK, 1)
+            try:
+                with self.assertRaises(TimeoutError):
+                    with ct_storage.locked(self.state, timeout=.08):
+                        self.fail('another handle owns the first byte')
+                self.assertEqual(lock_file.stat().st_size, 0)
+            finally:
+                owner.seek(0)
+                msvcrt.locking(owner.fileno(), msvcrt.LK_UNLCK, 1)
+
+        with ct_storage.locked(self.state, timeout=1):
+            self.assertEqual(lock_file.stat().st_size, 1)
+        self.assertEqual(lock_file.read_bytes(), b'0')
+
     def test_os_lock_released_when_body_raises(self):
         with self.assertRaises(RuntimeError):
             with ct_storage.locked(self.state):
