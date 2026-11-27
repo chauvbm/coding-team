@@ -35,7 +35,7 @@ class BridgeFileTests(unittest.TestCase):
 
     def remove_fixture(self):
         # Git objects are read-only on Windows; only our isolated fixture is touched.
-        def writable_retry(function, path, error):
+        def writable_retry(function, path, _exc_info):
             os.chmod(path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
             for retry in range(20):
                 try:
@@ -47,7 +47,8 @@ class BridgeFileTests(unittest.TestCase):
                     time.sleep(0.025)
 
         self.assertEqual(self.fixture.parent, Path(__file__).resolve().parents[1])
-        shutil.rmtree(self.fixture, onexc=writable_retry)
+        # onerror is available on every Python version in the test matrix.
+        shutil.rmtree(self.fixture, onerror=writable_retry)
 
     def git(self, *args):
         environment = {key: value for key, value in os.environ.items() if not key.upper().startswith('GIT_')}

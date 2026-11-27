@@ -20,7 +20,7 @@ class RuntimePackageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / 'source'
+        self.root = Path(self.temp.name).resolve() / 'source'
         self.root.mkdir()
         for name in ('LICENSE', 'SKILL.md'):
             (self.root / name).write_bytes(b'example\r\n')

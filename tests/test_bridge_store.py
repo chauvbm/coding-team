@@ -15,7 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 class BridgeStoreTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='ct bridge db ')))
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='ct bridge db '))).resolve()
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
         from ct_bridge_store import Store
         from ct_bridge_files import locate_workspace

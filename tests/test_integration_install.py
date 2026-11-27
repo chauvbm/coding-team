@@ -39,7 +39,7 @@ class IntegrationInstallTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.tmp = Path(self._tmp.name)
+        self.tmp = Path(self._tmp.name).resolve()
         self.home = self.tmp / 'home'
         self.project = self.tmp / 'project'
         self.home.mkdir()
