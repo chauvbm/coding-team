@@ -1,6 +1,6 @@
 ---
 name: coding-team-desktop-worker
-description: Handle direct /coding-team listen, /coding-team status and /coding-team help in Antigravity Desktop. Join the Codex Leader on the same worktree, then receive and finish assigned attempts in this chat.
+description: Handle /coding-team listen, including /coding-team listen startup tokens, /coding-team status and /coding-team help in Antigravity Desktop. Join the Codex Leader on the same worktree and handle attempts in this chat.
 ---
 
 # Antigravity Desktop worker
@@ -57,7 +57,13 @@ prompt. With AUTO enabled, arm the attached listener described below.
 ```
 
 Quote paths as PowerShell single-quoted literals, escaping `'` as `''`.
-These three operations use zero payload files and no task selector.
+These direct commands use zero payload files and no task selector.
+
+### Automatic startup in this chat
+
+The Leader's Sidecar sends `/coding-team listen startup ct1-…` in this chat. Copy the full token starting with `ct1-` as the string value of `startup_token` in a fresh inbox payload file. Use `join --workspace '<WORKSPACE>' --payload-file '<PAYLOAD>'`. Leave the token encoded. The helper verifies the intended chat, Leader, worktree, mode, installs and expiry.
+
+After success, take `worker_id` from the `join` reply. Read `status`, then use the attached listener flow with a different fresh payload file containing both the original `startup_token` and `joined_worker_id` from the join reply. If any helper rejects startup, report its reason and stop that startup. A bare `/coding-team listen` sent directly remains the manual join flow above.
 
 ## Attempt inputs and compatibility
 
@@ -108,7 +114,7 @@ Payload objects (values here are descriptions, not literal credentials):
 | resume | `{"execution_ticket":"ticket from successful begin"}` |
 | finish | `{"execution_ticket":"ticket from successful begin","state":"COMPLETED","result":"exact UTF-8 result Markdown"}` |
 
-`status` and `listen` take no payload or task selector. `begin`, `resume` and
+`status` takes no payload. `listen` takes a payload file only for the automatic startup described above. Both take no task selector. `begin`, `resume` and
 `finish` require both `--task-id` and `--attempt`. Do not guess a latest attempt.
 
 ### Accept a legacy coded invitation
@@ -137,6 +143,8 @@ legacy connect or listener prompt, or after finishing an automatic attempt.
 2. Start the `listen` command through this chat's native `run_command` as an
    attached background command: **`IsDaemon=false`**, with a short initial
    asynchronous wait (`WaitMsBeforeAsync=1000` when that field is supported).
+   For automatic startup, include `--payload-file '<PAYLOAD>'` for its fresh
+   `{ "startup_token": "ct1-…", "joined_worker_id": "…" }` file on this command.
    Retain the returned command handle in this chat. Respect the actual tool
    schema and permission decision. No detached launcher or model scheduler.
 3. Make one separate read-only `status` call to verify `waiter_ready=true`.

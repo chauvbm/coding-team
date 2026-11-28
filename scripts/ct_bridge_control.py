@@ -11,7 +11,9 @@ from functools import wraps
 import hashlib
 import hmac
 import json
+from os.path import normcase
 from pathlib import Path
+import re
 import secrets
 import time
 import uuid
@@ -26,6 +28,9 @@ RoundId = str
 PENDING = ('PUBLISHING', 'WAITING_FOR_USER', 'QUEUED', 'CLAIMED')
 TERMINAL = ('COMPLETED', 'FAILED', 'CANCELED', 'REVOKED')
 PLATFORM = 'antigravity'
+_STARTUP_VERSION = b'LISTENER_STARTUP_VERSION = 2'
+_STARTUP_FIELDS = {'chat_id', 'worker_id', 'leader_epoch', 'desktop_epoch', 'auto_epoch',
+                   'policy_digest', 'expires_at'}
 
 
 def _json(value):
@@ -633,6 +638,81 @@ def _new_invite(store, db, platform=PLATFORM):
                (uuid.uuid4().hex, store.clock() + 600.0, platform))
 
 
+def _listener_digest(ctx, group, peer, leader, worker, stamp):
+    snapshot = _json([normcase(str(ctx.paths.root)), group['leader_chat'], group['leader_epoch'],
+                      peer['desktop_epoch'], peer['auto_epoch'], stamp,
+                      leader._manifest_digest, worker._manifest_digest])
+    return hashlib.sha256(snapshot.encode('utf-8')).hexdigest()
+
+
+def require_listener_startup(ctx, group, peer, leader, worker, stamp, startup, now, worker_id,
+                             *, joined_worker_id=None):
+    """Check the delivered startup against the receiver's current transaction."""
+    if (not isinstance(startup, dict) or startup.keys() != _STARTUP_FIELDS
+            or not isinstance(startup['chat_id'], str)
+            or (startup['worker_id'] is not None and not isinstance(startup['worker_id'], str))
+            or any(type(startup[key]) is not int for key in ('leader_epoch', 'desktop_epoch', 'auto_epoch'))
+            or not isinstance(startup['policy_digest'], str)
+            or re.fullmatch(r'[a-f0-9]{64}', startup['policy_digest']) is None
+            or type(startup['expires_at']) not in (int, float) or not 0 <= startup['expires_at'] <= now + 120):
+        raise ValueError('INVALID_LISTENER_STARTUP')
+    if startup['expires_at'] <= now:
+        raise ValueError('LISTENER_REQUEST_EXPIRED')
+    if ctx.require_actor().chat_id != startup['chat_id']:
+        raise ValueError('LISTENER_TARGET_CHANGED')
+    if (not peer or not peer['enabled'] or not peer['auto_enabled'] or stamp is None
+            or (group['leader_epoch'], peer['desktop_epoch'], peer['auto_epoch']) !=
+            (startup['leader_epoch'], startup['desktop_epoch'], startup['auto_epoch'])
+            or not hmac.compare_digest(startup['policy_digest'], _listener_digest(ctx, group, peer, leader, worker, stamp))):
+        raise ValueError('STALE_ACTIVATION')
+    if joined_worker_id is None:
+        if worker_id != startup['worker_id']:
+            raise ValueError('LISTENER_TARGET_CHANGED')
+    elif joined_worker_id != worker_id or startup['worker_id'] not in (None, worker_id):
+        raise ValueError('LISTENER_TARGET_CHANGED')
+
+
+def listener_start_fence(ctx, epochs, chat_id, worker_id, *, policy_digest=None):
+    """Authorize one exact target, with invitation renewal allowed only at preparation."""
+    expected = binding.LeaderRef(ctx.require_leader(), epochs['leader_epoch'])
+    with operation_guard(ctx, worker_id=worker_id) as (store, db, leader, worker_binding):
+        group = require_leader(db, ctx, expected)
+        peer = _peer(db)
+        if not peer or (peer['desktop_epoch'], peer['auto_epoch']) != (epochs['desktop_epoch'], epochs['auto_epoch']):
+            raise ValueError('STALE_ACTIVATION')
+        stamp = _require_policy(leader, group)
+        if not peer['enabled'] or not peer['auto_enabled']:
+            raise ValueError('DESKTOP_OFF' if not peer['enabled'] else 'AUTO_OFF')
+        worker = db.execute('''SELECT * FROM workers WHERE platform=? AND chat_id=?
+            AND leader_epoch=? AND retired_at IS NULL''', (PLATFORM, chat_id, expected.epoch)).fetchone()
+        if (worker['worker_id'] if worker else None) != worker_id:
+            raise ValueError('LISTENER_TARGET_CHANGED')
+        installed_worker = worker_binding if worker else _discover_worker(ctx)
+        if installed_worker is None:
+            raise ValueError('WORKER_INSTALLATION_MISSING')
+        worker_entry = installed_worker.skill_dir / 'scripts/ct_bridge_worker.py'
+        if _STARTUP_VERSION not in worker_entry.read_bytes().splitlines():
+            raise ValueError('WORKER_STARTUP_UNSUPPORTED')
+        serialized = _json(asdict(stamp))
+        digest = _listener_digest(ctx, group, peer, leader, installed_worker, serialized)
+        if policy_digest is not None and digest != policy_digest:
+            raise ValueError('STALE_ACTIVATION')
+
+        now = store.clock()
+        if worker:
+            if _worker_occupied(db, worker_id):
+                raise ValueError('LISTENER_TARGET_BUSY')
+            if worker_ready(db, worker, 'auto', serialized, now):
+                raise ValueError('LISTENER_ALREADY_READY')
+        else:
+            expires = peer['join_expires_at'] if peer['join_id'] else None
+            if policy_digest is None and (expires is None or expires <= now + 150):
+                _new_invite(store, db)
+            elif expires is None or expires <= now:
+                raise ValueError('LISTENER_INVITE_EXPIRED')
+        return digest
+
+
 def _activate(store, db, platform=PLATFORM):
     row = _peer(db, platform)
     if row is None:
@@ -789,7 +869,7 @@ def _register_worker(ctx, db, leader, store):
     return worker_id
 
 
-def _join(ctx, ticket=None):
+def _join(ctx, ticket=None, *, startup=None):
     actor = ctx.require_actor()
     if ctx.component != 'worker' or actor.platform != PLATFORM:
         raise ValueError('WORKER_PLATFORM_UNSUPPORTED')
@@ -807,11 +887,14 @@ def _join(ctx, ticket=None):
                 raise ValueError('STALE_INVITE')
             if not supports_pair(group['leader_platform'], actor.platform):
                 raise ValueError('UNSUPPORTED_PAIR')
-            _require_policy(leader, group)
+            stamp = _require_policy(leader, group)
             if not peer or (not peer['enabled'] and ticket is None):
                 raise ValueError('DESKTOP_OFF')
             existing = db.execute('SELECT * FROM workers WHERE platform=? AND chat_id=? AND leader_epoch=? AND retired_at IS NULL',
                                   (actor.platform, actor.chat_id, group['leader_epoch'])).fetchone()
+            if startup is not None:
+                require_listener_startup(ctx, group, peer, leader, own, _json(asdict(stamp)), startup, store.clock(),
+                                         existing['worker_id'] if existing else None)
             if ticket is None and existing:
                 worker_id = _register_worker(ctx, db, leader, store)
             else:
@@ -833,8 +916,8 @@ def _join(ctx, ticket=None):
 
 
 @_view_operation
-def join_peer(ctx):
-    return _join(ctx)
+def join_peer(ctx, *, startup=None):
+    return _join(ctx, startup=startup)
 
 
 @_view_operation
@@ -843,11 +926,15 @@ def connect(ctx, ticket):
     return _join(ctx, ticket)
 
 
+def _worker_occupied(db, worker_id):
+    return db.execute("SELECT 1 FROM attempts WHERE worker_id=? AND state IN ('PUBLISHING','WAITING_FOR_USER','QUEUED','CLAIMED','RUNNING','NEEDS_USER','OUTCOME_UNKNOWN') LIMIT 1", (worker_id,)).fetchone() is not None
+
+
 def worker_ready(db, worker, mode, policy_stamp, now):
     group, peer = _group(db), _peer(db, worker['platform'])
     if worker['retired_at'] is not None or worker['leader_epoch'] != group['leader_epoch'] or not peer or not peer['enabled']:
         return False
-    if db.execute("SELECT 1 FROM attempts WHERE worker_id=? AND state IN ('PUBLISHING','WAITING_FOR_USER','QUEUED','CLAIMED','RUNNING','NEEDS_USER','OUTCOME_UNKNOWN') LIMIT 1", (worker['worker_id'],)).fetchone():
+    if _worker_occupied(db, worker['worker_id']):
         return False
     if mode == 'manual':
         return True

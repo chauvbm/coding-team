@@ -440,7 +440,7 @@ def _wake(ctx, db, worker, worker_binding, leader, row, now):
     return _view(_attempt(db, key), claim=claim)
 
 
-def listen(ctx):
+def listen(ctx, *, startup=None, joined_worker_id=None):
     """Register one heartbeat per worker and poll read-only until it can claim."""
     nonce_hash = _token_hash(secrets.token_urlsafe(32))
     worker_id = None
@@ -463,6 +463,10 @@ def listen(ctx):
                 now = writer.clock()
                 signature = _generation(group, peer, stamp)
                 if generation is None:
+                    if startup is not None:
+                        control.require_listener_startup(ctx, group, peer, leader, worker_binding, stamp,
+                                                         startup, now, observed_worker_id,
+                                                         joined_worker_id=joined_worker_id)
                     if _live(current, signature, now):
                         return _view(ok=False, state='STOPPED', reason='WAITER_BUSY')
                 elif (worker_id != observed_worker_id or signature != generation

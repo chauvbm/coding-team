@@ -65,6 +65,8 @@ class BridgeControlTests(unittest.TestCase):
         names += ('coding_team', 'ct_bridge_cli') if component == 'leader' else ('ct_bridge_worker',)
         files = {'SKILL.md': b'fixture skill\n'}
         files.update({f'scripts/{name}.py': f'# fixture {name}\n'.encode() for name in names})
+        if component == 'worker':
+            files['scripts/ct_bridge_worker.py'] += b'LISTENER_STARTUP_VERSION = 2\n'
         files.update({f'agents/roles/{path.name}': path.read_bytes() for path in
                       (Path(__file__).resolve().parents[1] / 'agents/roles').iterdir() if path.is_file()})
         files[f'platforms/{platform}.json'] = (Path(__file__).resolve().parents[1] / 'platforms' / f'{platform}.json').read_bytes()
@@ -173,6 +175,132 @@ class BridgeControlTests(unittest.TestCase):
         self.configure('auto_off')
         self.assertEqual(self.prepare_worker(activation, [tab])['reason'], 'STALE_ACTIVATION')
         self.assertEqual(self.prepare_worker(control.connection_status(self.a), [tab])['reason'], 'AUTO_OFF')
+
+    def start_listener(self, activation, tab, *, ctx=None, **fields):
+        import io
+        from types import SimpleNamespace
+        from ct_bridge_cli import bridge_command
+
+        request = {name: activation[name] for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch')}
+        request.update(project_id='11111111-2222-3333-4444-555555555555', tabs=[tab])
+        request.update(fields)
+        args = SimpleNamespace(operation='start-listener', workspace=self.root, platform='codex',
+                               payload_stdin=True, task_id=None, attempt=None, wait_seconds=0)
+        view, _ = bridge_command(args, self.leader_manifest.parent, (ctx or self.a).env, self.home,
+                                 io.BytesIO(json.dumps(request).encode('utf-8')))
+        return view
+
+    def test_start_listener_refreshes_only_the_invite_for_the_selected_unpaired_chat(self):
+        active = self.configure()
+        existing = control.join_peer(self.worker)['worker_id']
+        round_id = control.open_round(self.a, self.binding.LeaderRef(self.a.actor, active['leader_epoch']))
+        tab = {'chat_id': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'model': 'Neon High', 'idle': True}
+        with control.Store(self.paths).write() as db:
+            db.execute('UPDATE peers SET join_expires_at=0')
+        prior = self.group()
+
+        with mock.patch('ct_bridge_desktop.submit_listener', create=True,
+                        return_value={'ok': True, 'state': 'LISTENER_REQUESTED', 'ready': False}) as submit:
+            result = self.start_listener(active, tab, preferred_model=tab['model'])
+
+        self.assertEqual(result['state'], 'LISTENER_REQUESTED', result)
+        self.assertFalse(result['ready'])
+        self.assertEqual(result['target']['chat_id'], tab['chat_id'])
+        self.assertIsNone(result['target']['worker_id'])
+        submit.assert_called_once()
+        _, project, chat, epochs, worker, digest = submit.call_args.args
+        self.assertEqual((project, chat, worker), ('11111111-2222-3333-4444-555555555555', tab['chat_id'], None))
+        self.assertRegex(digest, '^[0-9a-f]{64}$')
+        current = self.group()
+        self.assertNotEqual(prior['join_id'], current['join_id'])
+        self.assertGreater(current['join_expires_at'], time.time())
+        self.assertEqual({key: current[key] for key in epochs}, epochs)
+        status = control.connection_status(self.a)
+        self.assertIn(round_id, status['round_ids'])
+        self.assertEqual([w['worker_id'] for w in status['connections'][0]['workers']], [existing])
+
+    def test_start_listener_requires_an_exact_idle_target_with_the_selected_model(self):
+        active = self.configure()
+        tab = {'chat_id': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'model': 'Neon High', 'idle': True}
+        target = self.context('antigravity', tab['chat_id'], 'worker')
+        joined = control.join_peer(target)['worker_id']
+        with mock.patch('ct_bridge_desktop.submit_listener', create=True,
+                        return_value={'ok': True, 'state': 'LISTENER_PENDING', 'ready': False}) as submit:
+            self.assertEqual(self.start_listener(active, tab | {'model': None})['state'], 'VERIFY_MODEL')
+            self.assertEqual(self.start_listener(active, tab, preferred_model='Hydrogen Low')['state'], 'SET_MODEL')
+            self.assertEqual(self.start_listener(active, tab | {'idle': False})['reason'], 'NO_IDLE_TAB')
+            self.assertEqual(self.start_listener(active, tab, ctx=self.b)['reason'], 'NOT_LEADER')
+            self.assertEqual(self.start_listener(active, tab, tabs=[tab, tab])['reason'], 'INVALID_OPEN_TABS')
+            self.assertEqual(self.start_listener(active, tab, project_id='invalid')['reason'], 'INVALID_PAYLOAD')
+            self.assertEqual(self.start_listener(active, tab, affinity_worker_id='unrelated')['reason'], 'AFFINITY_UNAVAILABLE')
+            submit.assert_not_called()
+            pending = self.start_listener(active, tab, preferred_model=tab['model'], affinity_worker_id=joined)
+            self.assertEqual(pending['target']['worker_id'], joined)
+            self.assertEqual(pending['state'], 'LISTENER_PENDING')
+            self.assertFalse(pending['ready'])
+            submit.assert_called_once()
+            off = self.configure('auto_off')
+            self.assertEqual(self.start_listener(active, tab)['reason'], 'STALE_ACTIVATION')
+            self.assertEqual(self.start_listener(off, tab)['reason'], 'AUTO_OFF')
+            submit.assert_called_once()
+
+    def test_listener_fence_rechecks_policy_generation_and_exact_worker(self):
+        import ct_policy
+        from dataclasses import asdict
+
+        active = self.configure()
+        epochs = {name: active[name] for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch')}
+        chat = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        digest = control.listener_start_fence(self.a, epochs, chat, None)
+        self.assertEqual(control.listener_start_fence(self.a, epochs, chat, None, policy_digest=digest), digest)
+        ct_policy.apply_command(self.policy, '/coding-team off', self.a.actor.chat_id)
+        ct_policy.apply_command(self.policy, '/coding-team on', self.a.actor.chat_id)
+        with self.assertRaisesRegex(ValueError, 'STALE_ACTIVATION'):
+            control.listener_start_fence(self.a, epochs, chat, None, policy_digest=digest)
+
+        worker = control.join_peer(self.context('antigravity', chat, 'worker'))['worker_id']
+        with self.assertRaisesRegex(ValueError, 'LISTENER_TARGET_CHANGED'):
+            control.listener_start_fence(self.a, epochs, chat, None)
+        self.assertRegex(control.listener_start_fence(self.a, epochs, chat, worker), '^[0-9a-f]{64}$')
+        with control.Store(self.paths).write() as db:
+            stamp = control._policy(self.a.own_binding(), db.execute('SELECT * FROM group_state').fetchone())
+            db.execute('''INSERT INTO waiter(worker_id,nonce_hash,leader_epoch,desktop_epoch,auto_epoch,policy_stamp,expires_at)
+                VALUES(?, 'private', ?, ?, ?, ?, ?)''',
+                (worker, epochs['leader_epoch'], epochs['auto_epoch'], epochs['desktop_epoch'],
+                 control._json(asdict(stamp)), time.time() + 60))
+        with self.assertRaisesRegex(ValueError, 'LISTENER_ALREADY_READY'):
+            control.listener_start_fence(self.a, epochs, chat, worker)
+        with mock.patch('ct_bridge_desktop.submit_listener', create=True) as submit:
+            result = self.start_listener(active, {'chat_id': chat, 'model': 'Neon High', 'idle': True})
+            self.assertEqual(result['state'], 'READY', result)
+            submit.assert_not_called()
+
+    def test_automatic_startup_is_fenced_at_join_and_before_waiter_registration(self):
+        import ct_bridge_attempts as attempts
+        import ct_policy
+
+        active = self.configure()
+        epochs = {name: active[name] for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch')}
+        chat = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        wrong = self.context('antigravity', '11111111-2222-3333-4444-555555555555', 'worker')
+        target = self.context('antigravity', chat, 'worker')
+        prepared = {**epochs, 'chat_id': chat, 'worker_id': None, 'expires_at': time.time() + 60,
+                    'policy_digest': control.listener_start_fence(self.a, epochs, chat, None)}
+        self.assertEqual(control.join_peer(wrong, startup=prepared)['reason'], 'LISTENER_TARGET_CHANGED')
+        expired = {**prepared, 'expires_at': 0}
+        self.assertEqual(control.join_peer(target, startup=expired)['reason'], 'LISTENER_REQUEST_EXPIRED')
+        self.assertIsNone(self.group()['worker_chat'])
+        worker = control.join_peer(target, startup=prepared)['worker_id']
+        with self.assertRaisesRegex(ValueError, 'LISTENER_TARGET_CHANGED'):
+            attempts.listen(target, startup=prepared, joined_worker_id='wrong-worker')
+        ct_policy.apply_command(self.policy, '/coding-team off', self.a.actor.chat_id)
+        ct_policy.apply_command(self.policy, '/coding-team on', self.a.actor.chat_id)
+        with self.assertRaisesRegex(ValueError, 'STALE_ACTIVATION'):
+            attempts.listen(target, startup=prepared, joined_worker_id=worker)
+        self.configure('auto_off')
+        self.assertEqual(control.join_peer(target, startup=prepared)['reason'], 'STALE_ACTIVATION')
+        self.assertEqual(control.join_peer(target)['worker_id'], worker)
+        self.assertFalse(control.connection_status(target)['waiter_ready'])
 
     def test_configure_implicit_leader_and_modes(self):
         view = self.configure('auto_off')

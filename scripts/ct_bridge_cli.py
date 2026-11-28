@@ -21,7 +21,7 @@ ATTEMPT_OPERATIONS = ('publish', 'reoffer', 'grant-read', 'collect', 'cancel-pen
                       'reconcile', 'ack', 'cleanup')
 OPERATIONS = ('open-round', 'close-round', 'register-native', 'bind-native', 'finish-native',
               'reserve-leader', 'finish-leader', 'complete-work-item', 'ledger-evidence',
-              'rollback-store', 'wait-ready', 'prepare-worker', *ATTEMPT_OPERATIONS)
+              'rollback-store', 'wait-ready', 'prepare-worker', 'start-listener', *ATTEMPT_OPERATIONS)
 _PAYLOAD_LIMIT = 3 * 1024 * 1024
 _MACHINE_REASON = re.compile(r'[A-Z][A-Z0-9_]{0,79}')
 
@@ -235,12 +235,13 @@ def bridge_command(args, source, env, home, stream):
             if payload.keys() - {'grant'}:
                 _reject('INVALID_PAYLOAD')
             result = _collect(ctx, _key(args), payload.get('grant'), args.wait_seconds)
-        elif operation == 'prepare-worker':
-            from ct_bridge_desktop import prepare_worker
+        elif operation in ('prepare-worker', 'start-listener'):
+            from ct_bridge_desktop import prepare_worker, start_listener
 
             if not args.payload_stdin or args.task_id is not None or args.attempt is not None or args.wait_seconds != 0:
                 _reject('INVALID_PAYLOAD')
-            result = prepare_worker(ctx, payload)
+            prepare = prepare_worker if operation == 'prepare-worker' else start_listener
+            result = prepare(ctx, payload)
         else:
             result = _mutate(ctx, args, payload)
         if (operation in ('publish', 'reoffer') and result.get('ok')

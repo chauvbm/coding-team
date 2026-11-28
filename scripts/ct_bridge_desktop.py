@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import re
+from uuid import UUID
 
-from ct_bridge_control import connection_status
+from ct_bridge_control import connection_status, listener_start_fence
+from ct_bridge_sidecar import submit_listener
 
 
 EPOCHS = ('leader_epoch', 'desktop_epoch', 'auto_epoch')
@@ -18,6 +20,15 @@ def _is_id(value):
 def _is_model(value):
     return value is None or (isinstance(value, str) and 0 < len(value) <= 160
                              and value == value.strip() and value.isprintable())
+
+
+def _is_uuid(value):
+    if not isinstance(value, str) or len(value) != 36:
+        return False
+    try:
+        return str(UUID(value)) == value
+    except ValueError:
+        return False
 
 
 def _observed_tabs(rows):
@@ -91,3 +102,30 @@ def prepare_worker(ctx, payload):
     _, _, _, action, target = min(candidates)
     return {'ok': True, 'state': action, 'ready': action == 'READY', 'target': target,
             'workspace': status['workspace'], **{name: status[name] for name in EPOCHS}}
+
+
+def start_listener(ctx, payload):
+    project = payload.get('project_id')
+    if not _is_uuid(project):
+        raise ValueError('INVALID_PAYLOAD')
+    tabs = _observed_tabs(payload.get('tabs'))
+    if len(tabs) != 1:
+        raise ValueError('INVALID_OPEN_TABS')
+    chat = next(iter(tabs))
+    if not _is_uuid(chat):
+        raise ValueError('INVALID_OPEN_TABS')
+
+    prepared = prepare_worker(ctx, {key: value for key, value in payload.items() if key != 'project_id'})
+    if prepared['state'] not in ('PAIR_REQUIRED', 'LISTEN_REQUIRED'):
+        return prepared
+    target = prepared['target']
+    observed, preferred = target['observed_model'], target['preferred_model']
+    if observed is None:
+        return {**prepared, 'state': 'VERIFY_MODEL'}
+    if preferred is not None and observed != preferred:
+        return {**prepared, 'state': 'SET_MODEL'}
+
+    epochs = {name: prepared[name] for name in EPOCHS}
+    worker = target['worker_id']
+    digest = listener_start_fence(ctx, epochs, chat, worker)
+    return {**prepared, **submit_listener(ctx, project, chat, epochs, worker, digest)}

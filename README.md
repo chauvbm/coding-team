@@ -61,7 +61,7 @@ python ~/src/coding-team/scripts/coding_team.py install --platform antigravity -
 ```
 
 1. In the Codex chat you want as Leader, send `/coding-team agy auto on`. Codex selects that chat and opens an invitation for the active worktree.
-2. Send `/coding-team listen` in each Antigravity chat you want in the team on that worktree. Codex reports each chat's readiness. The Leader chooses which workers to use, assigns the same coding-team roles as for native agents, and sends corrections back to the original chat.
+2. Open the Antigravity chats you want available on that worktree. In AUTO, the Leader selects a chat, starts its listener when needed, and verifies its readiness before dispatching. It assigns the same coding-team roles as for native agents and sends corrections to the original chat. To join a chat manually, send `/coding-team listen` in that chat.
 
 Use `/coding-team agy on` for manual delivery on first activation, or `/coding-team agy auto off` to select manual delivery explicitly. In either app, `/coding-team status` shows the current role and connection, and `/coding-team help` lists the commands. Each worktree has one inter-app Leader. To move the role, use the intended activation command in the new Codex chat after the current coordination round closes. Follow the [Desktop worker guide](references/antigravity-desktop.md) for readiness, result collection and recovery.
 

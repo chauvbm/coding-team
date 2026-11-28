@@ -156,16 +156,18 @@ class WorkerEntryTests(unittest.TestCase):
         self.assertIn('supported_pairs', json.loads(output.getvalue()))
         self.assertFalse((self.fixture.workspace / '.coding-team').exists())
 
-    def test_worker_public_operations_reject_attempt_and_payload_selectors(self):
+    def test_worker_controls_reject_attempt_selectors_and_unsafe_payload_paths(self):
         payload_path = self.base / 'secret.json'
         payload_path.write_text('SECRET', encoding='utf-8')
-        for command in ('join', 'connection-status', 'help'):
+        for command in ('join', 'listen', 'connection-status', 'help'):
             for extra in (('--task-id', 'task'), ('--attempt', '1'),
                           ('--payload-file', str(payload_path))):
                 with self.subTest(command=command, extra=extra):
                     code, view = self.invoke(command, extra=extra)
                     self.assertEqual(code, 2)
-                    self.assertEqual(view['reason'], 'INVALID_ARGUMENTS')
+                    startup_payload = command in ('join', 'listen') and extra[0] == '--payload-file'
+                    expected = 'INVALID_PAYLOAD_PATH' if startup_payload else 'INVALID_ARGUMENTS'
+                    self.assertEqual(view['reason'], expected)
                     self.assertNotIn('SECRET', json.dumps(view))
         self.assertEqual(payload_path.read_text(encoding='utf-8'), 'SECRET')
 

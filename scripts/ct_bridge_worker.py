@@ -6,6 +6,7 @@ Every invocation resolves the current chat from the trusted app environment.
 from __future__ import annotations
 
 import argparse
+from base64 import b64decode
 import hashlib
 import json
 import os
@@ -17,10 +18,12 @@ import ct_bridge_binding as binding
 import ct_bridge_files as files
 
 COMMANDS = ('connect', 'status', 'listen', 'begin', 'resume', 'finish', 'join', 'connection-status', 'help')
-_PUBLIC_OPERATIONS = ('join', 'connection-status', 'help')
+LISTENER_STARTUP_VERSION = 2
+_NO_PAYLOAD = ('status', 'connection-status', 'help')
 MAX_PAYLOAD_BYTES = files.MAX_FILE_BYTES
 _REASON = re.compile(r'[A-Z][A-Z0-9_]{0,63}\Z', re.ASCII)
 _TASK = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z', re.ASCII)
+_STARTUP_TOKEN = re.compile(r'ct1-([A-Za-z0-9_-]{1,768})\Z', re.ASCII)
 
 
 class WorkerInputError(ValueError):
@@ -52,7 +55,7 @@ def _arguments(argv):
             raise WorkerInputError('INVALID_ARGUMENTS')
     elif args.task_id is not None or args.attempt is not None:
         raise WorkerInputError('INVALID_ARGUMENTS')
-    if args.operation in ('status', 'listen', *_PUBLIC_OPERATIONS) and args.payload_file is not None:
+    if args.operation in _NO_PAYLOAD and args.payload_file is not None:
         raise WorkerInputError('INVALID_ARGUMENTS')
     return args
 
@@ -73,8 +76,23 @@ def _secret(value, *, optional=False):
         raise WorkerInputError('INVALID_PAYLOAD')
 
 
+def _startup_token(value):
+    match = _STARTUP_TOKEN.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        raise WorkerInputError('INVALID_PAYLOAD')
+    encoded = match[1]
+    try:
+        decoded = b64decode(encoded + '=' * (-len(encoded) % 4), altchars=b'-_', validate=True)
+        startup = json.loads(decoded.decode('utf-8'), object_pairs_hook=_unique)
+    except (ValueError, UnicodeError, RecursionError):
+        raise WorkerInputError('INVALID_PAYLOAD') from None
+    if not isinstance(startup, dict):
+        raise WorkerInputError('INVALID_PAYLOAD')
+    return startup
+
+
 def _payload(args, ctx, stdin):
-    if args.operation in ('status', 'listen', *_PUBLIC_OPERATIONS):
+    if args.operation in _NO_PAYLOAD or (args.operation in ('join', 'listen') and args.payload_file is None):
         return {}
     if args.payload_file is not None:
         raw = files.consume_payload_file(ctx.paths, Path(args.payload_file))
@@ -91,10 +109,13 @@ def _payload(args, ctx, stdin):
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique) if raw else {}
     except (ValueError, UnicodeError, RecursionError):
         raise WorkerInputError('INVALID_PAYLOAD') from None
-    schemas = {'connect': ({'ticket'}, {'ticket'}), 'begin': (set(), {'claim'}),
-               'resume': ({'execution_ticket'}, {'execution_ticket'}),
-               'finish': ({'execution_ticket', 'state', 'result'}, {'execution_ticket', 'state', 'result'})}
-    required, allowed = schemas[args.operation]
+    fields = {'connect': {'ticket'}, 'resume': {'execution_ticket'},
+              'finish': {'execution_ticket', 'state', 'result'},
+              'join': {'startup_token'}, 'listen': {'startup_token', 'joined_worker_id'}}
+    if args.operation == 'begin':
+        required, allowed = set(), {'claim'}
+    else:
+        required = allowed = fields[args.operation]
     if not isinstance(value, dict) or not required <= value.keys() or not value.keys() <= allowed:
         raise WorkerInputError('INVALID_PAYLOAD')
     for key in ('ticket', 'execution_ticket'):
@@ -102,6 +123,11 @@ def _payload(args, ctx, stdin):
             _secret(value[key])
     if 'claim' in value:
         _secret(value['claim'], optional=True)
+    if 'startup_token' in value:
+        value['startup'] = _startup_token(value.pop('startup_token'))
+    if 'joined_worker_id' in value and (not isinstance(value['joined_worker_id'], str)
+                                       or re.fullmatch(r'[a-f0-9]{32}', value['joined_worker_id']) is None):
+        raise WorkerInputError('INVALID_PAYLOAD')
     if args.operation == 'finish':
         if value['state'] not in ('COMPLETED', 'FAILED', 'CANCELED', 'NEEDS_USER', 'OUTCOME_UNKNOWN'):
             raise WorkerInputError('INVALID_PAYLOAD')
@@ -117,7 +143,7 @@ def _payload(args, ctx, stdin):
 def _dispatch(args, ctx, payload):
     import ct_bridge_control as control
     if args.operation == 'join':
-        return control.join_peer(ctx)
+        return control.join_peer(ctx, **payload)
     if args.operation == 'connection-status':
         return control.connection_status(ctx)
     if args.operation == 'connect':
@@ -126,7 +152,7 @@ def _dispatch(args, ctx, payload):
         return control.worker_status(ctx)
     import ct_bridge_attempts as attempts
     if args.operation == 'listen':
-        return attempts.listen(ctx)
+        return attempts.listen(ctx, **payload)
     key = files.AttemptKey(args.task_id, args.attempt)
     if args.operation == 'begin':
         return attempts.begin(ctx, key, payload.get('claim'))

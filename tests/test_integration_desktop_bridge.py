@@ -3,6 +3,7 @@
 No Desktop application is launched. Each case owns a fresh HOME, native policy,
 Git checkout, and local Python listener, and never uses the invoking chat's state.
 """
+from base64 import urlsafe_b64encode
 import hashlib
 import json
 import os
@@ -320,6 +321,41 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         # The same activation remains valid while the worker's attached listener is alive.
         self.assertEqual(ready['leader_epoch'], epochs['leader_epoch'])
         self.stop_listener(listener)
+
+    def test_installed_start_listener_checks_the_selected_chat_and_app_config(self):
+        activated = self.control('/coding-team agy auto on')
+        epochs = {name: activated[name] for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch')}
+        tab = {'chat_id': 'a4f9c2e8-1b7d-4039-8e6a-5c2f1d0b7e43', 'model': 'Neon High', 'idle': True}
+        payload = {**epochs, 'tabs': [tab]}
+        target = self.bridge('prepare-worker', payload)
+        self.assertEqual(target['state'], 'PAIR_REQUIRED')
+        self.assertEqual(target['target']['chat_id'], tab['chat_id'])
+        config = self.home / '.gemini/config/config.json'
+        before = b'{"sidecars": "malformed fixture"}\n'
+        config.write_bytes(before)
+        outcome = self.bridge('start-listener', {**payload, 'project_id': '745f24ca-f013-440b-9b29-9381360749a8'},
+                              ok=False)
+        self.assertEqual(outcome['reason'], 'SIDECAR_CONFIG_INVALID', outcome)
+        self.assertFalse(outcome['ready'])
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(self.bridge('prepare-worker', payload)['state'], 'PAIR_REQUIRED')
+        inbox_payload = self.workspace / '.coding-team/bridge/inbox' / (uuid.uuid4().hex + '.json')
+        startup = {**epochs, 'chat_id': tab['chat_id'], 'worker_id': None,
+                   'policy_digest': 'a' * 64, 'expires_at': 0}
+        token = urlsafe_b64encode(json.dumps(startup).encode('utf-8')).rstrip(b'=').decode('ascii')
+        inbox_payload.write_text(json.dumps({'startup_token': 'ct1-' + token}), encoding='utf-8')
+        expired = self.invoke(self.worker_cli, ['join', '--workspace', self.workspace,
+                                               '--payload-file', inbox_payload],
+                              chat=tab['chat_id'], worker=True, ok=False)
+        self.assertEqual(expired['reason'], 'LISTENER_REQUEST_EXPIRED', expired)
+        self.assertFalse(inbox_payload.exists())
+        self.assertEqual(self.bridge('prepare-worker', payload)['state'], 'PAIR_REQUIRED')
+        inbox_payload.write_text(json.dumps({'startup_token': 'ct1-malformed+token'}), encoding='utf-8')
+        invalid = self.invoke(self.worker_cli, ['join', '--workspace', self.workspace,
+                                               '--payload-file', inbox_payload],
+                              chat=tab['chat_id'], worker=True, ok=False)
+        self.assertEqual(invalid['reason'], 'INVALID_PAYLOAD', invalid)
+        self.assertFalse(inbox_payload.exists())
 
     def test_legacy_pair_and_receipts_readable(self):
         """A v1-style ticket pair and receipt remain visible to the public status command."""
