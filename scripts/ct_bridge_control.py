@@ -866,7 +866,7 @@ def _snapshot(store, *, poll=False):
             [dict(row) for row in db.execute('SELECT * FROM waiter')], _busy(db), _open_attempts(db), store.clock())
 
 
-def _connection_status(ctx, snapshot):
+def _connection_status(ctx, snapshot, *, include_worker_chat_ids=False):
     group, peers, workers, waiters, rounds, attempts, now = snapshot
     actor = ctx.actor
     app = actor.platform if actor else (PLATFORM if ctx.component == 'worker' else 'codex')
@@ -921,6 +921,8 @@ def _connection_status(ctx, snapshot):
             'paired': True, 'waiter_ready': live, 'readiness': readiness, 'reason': reason,
             'review_pending': review, 'attempts': related,
             'next_action': '/coding-team listen' if readiness == 'WAITING' else None})
+        if include_worker_chat_ids and role == 'leader':
+            views[-1]['chat_id'] = worker['chat_id']
     ready = any(row['readiness'] in ('MANUAL_READY', 'AUTO_READY') for row in views)
     expired = bool(peer and peer['join_expires_at'] is not None and now >= peer['join_expires_at'])
     reason = base_reason
@@ -963,12 +965,14 @@ def _status_failure(ctx, exc):
         workspace=str(ctx.paths.root), role='unknown', leader=None, connections=[], observed_at=time.time())
 
 
-def connection_status(ctx):
+def connection_status(ctx, *, include_worker_chat_ids=False):
+    """Read status with chat IDs limited to the Leader's internal tab matching."""
     try:
         with Store(ctx.paths).read_compatible() as db:
             if db is not None and db.execute('PRAGMA user_version').fetchone()[0] == 1:
                 return _status_failure(ctx, ValueError('BRIDGE_UPGRADE_REQUIRED'))
-        return _connection_status(ctx, _snapshot(Store(ctx.paths)))
+        return _connection_status(ctx, _snapshot(Store(ctx.paths)),
+                                  include_worker_chat_ids=include_worker_chat_ids)
     except (ValueError, OSError, TimeoutError) as exc:
         return _status_failure(ctx, exc)
 

@@ -109,6 +109,71 @@ class BridgeControlTests(unittest.TestCase):
                 'depends_on': {}, 'read_paths': [], 'write_paths': [], 'test_paths': [], 'check_outputs': [],
                 **fields}
 
+    def prepare_worker(self, activation, tabs, *, model=None, affinity=None, ctx=None):
+        import io
+        from types import SimpleNamespace
+        from ct_bridge_cli import bridge_command
+
+        ctx = ctx or self.a
+        args = SimpleNamespace(operation='prepare-worker', workspace=self.root, platform='codex',
+                               payload_stdin=True, task_id=None, attempt=None, wait_seconds=0)
+        request = {name: activation[name] for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch')}
+        request.update(tabs=tabs, preferred_model=model, affinity_worker_id=affinity)
+        view, _ = bridge_command(args, self.leader_manifest.parent, ctx.env, self.home,
+                                 io.BytesIO(json.dumps(request).encode('utf-8')))
+        return view
+
+    def test_prepare_worker_ranks_open_tabs_and_preserves_affinity(self):
+        from dataclasses import asdict
+
+        activation = self.configure()
+        workers = [control.join_peer(self.context('antigravity', chat, 'worker'))['worker_id']
+                   for chat in ('chat-one', 'chat-two', 'chat-three')]
+        with control.Store(self.paths).write() as db:
+            group = db.execute('SELECT * FROM group_state').fetchone()
+            policy = json.dumps(asdict(control._policy(self.a.own_binding(), group)),
+                                sort_keys=True, separators=(',', ':'))
+            for worker in workers[:2]:
+                db.execute('''INSERT INTO waiter(worker_id,nonce_hash,leader_epoch,auto_epoch,
+                    desktop_epoch,policy_stamp,expires_at) VALUES(?,'private',?,?,?,?,?)''',
+                    (worker, activation['leader_epoch'], activation['auto_epoch'],
+                     activation['desktop_epoch'], policy, time.time() + 60))
+        tabs = [
+            {'chat_id': 'chat-four', 'model': 'Gemini 4 Neon High', 'idle': True},
+            {'chat_id': 'chat-three', 'model': 'Gemini 4 Neon High', 'idle': True},
+            {'chat_id': 'chat-two', 'model': 'Gemini 4 Neon High', 'idle': True},
+            {'chat_id': 'chat-one', 'model': 'Gemini 4 Hydrogen Low', 'idle': True},
+        ]
+        before = self.paths.db.read_bytes()
+        view = self.prepare_worker(activation, tabs, model='Gemini 4 Neon High')
+        self.assertEqual(view['state'], 'READY', view)
+        self.assertEqual(view['target']['worker_id'], workers[1])
+        self.assertEqual(view['target']['chat_id'], 'chat-two')
+        second = self.prepare_worker(activation, tabs, model='Gemini 4 Neon High', affinity=workers[0])
+        self.assertEqual(second['state'], 'SET_MODEL', second)
+        self.assertEqual(second['target']['chat_id'], 'chat-one')
+        quiet = self.prepare_worker(activation, tabs[:2], model='Gemini 4 Neon High')
+        self.assertEqual(quiet['state'], 'LISTEN_REQUIRED', quiet)
+        self.assertEqual(quiet['target']['worker_id'], workers[2])
+        unpaired = self.prepare_worker(activation, tabs[:1])
+        self.assertEqual(unpaired['state'], 'PAIR_REQUIRED', unpaired)
+        self.assertIsNone(unpaired['target']['worker_id'])
+        missing = self.prepare_worker(activation, tabs[:1], affinity=workers[2])
+        self.assertEqual(missing['reason'], 'AFFINITY_UNAVAILABLE', missing)
+        busy = self.prepare_worker(activation, [tabs[2] | {'idle': False}], affinity=workers[1])
+        self.assertEqual(busy['reason'], 'AFFINITY_UNAVAILABLE', busy)
+        self.assertEqual(self.paths.db.read_bytes(), before)
+
+    def test_prepare_worker_rejects_other_leaders_off_stale_and_ambiguous_tabs(self):
+        activation = self.configure()
+        tab = {'chat_id': 'some-open-tab', 'model': None, 'idle': True}
+        self.assertEqual(self.prepare_worker(activation, [tab], ctx=self.b)['reason'], 'NOT_LEADER')
+        for malformed in ([tab, tab], [tab | {'idle': 1}], [tab | {'model': 'good\nbad'}]):
+            self.assertEqual(self.prepare_worker(activation, malformed)['reason'], 'INVALID_OPEN_TABS')
+        self.configure('auto_off')
+        self.assertEqual(self.prepare_worker(activation, [tab])['reason'], 'STALE_ACTIVATION')
+        self.assertEqual(self.prepare_worker(control.connection_status(self.a), [tab])['reason'], 'AUTO_OFF')
+
     def test_configure_implicit_leader_and_modes(self):
         view = self.configure('auto_off')
         self.assertTrue(view['ok'], view)

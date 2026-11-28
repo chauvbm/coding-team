@@ -302,6 +302,17 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         listener = self.start_listener()
         ready = self.wait_ready(epochs)
         self.assertEqual(ready['state'], 'READY')
+        candidate = self.bridge('prepare-worker', {
+            **{name: ready[name] for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch')},
+            'preferred_model': 'Gemini 4 Neon High',
+            'tabs': [
+                {'chat_id': 'unpaired-open-tab', 'model': 'Gemini 4 Neon High', 'idle': True},
+                {'chat_id': 'worker-chat', 'model': 'Gemini 4 Hydrogen Medium', 'idle': True},
+            ],
+        })
+        self.assertEqual(candidate['state'], 'SET_MODEL', candidate)
+        self.assertEqual(candidate['target']['worker_id'], joined['worker_id'])
+        self.assertEqual(candidate['target']['chat_id'], 'worker-chat')
         connection = self.worker('connection-status')['connections'][0]
         self.assertTrue(connection['paired'])
         self.assertTrue(connection['waiter_ready'])

@@ -55,6 +55,8 @@ Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `
 
 For [external Desktop workers](references/control-policy.md#external-workers), handle direct controls with the installed `command` entry from the worktree. Check Leader authority, policy, opt-in and the selected chat's readiness. Choose the role and work item before choosing a native or Desktop executor. Open a round before dispatch, reserve its file scope, and keep the round open through review. Follow the installed platform guide for listeners, receipt collection, corrections and recovery.
 
+When the user has opened Desktop worker chats for this worktree, follow the installed platform guide to prepare the chats needed for the assignment. Match chat identity, model and readiness before publishing. Use a ready paired chat or native agent when Desktop input or listener startup is unavailable.
+
 For direct `/coding-team status`, `/coding-team help` or `/coding-team listen`, check the [external worker routing](references/control-policy.md#external-workers) before responding. If this chat is the Desktop worker, follow its installed worker skill for these commands. Handle native policy changes with the native command entry.
 
 | Role | Purpose | Ledger role |
