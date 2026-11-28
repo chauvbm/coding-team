@@ -129,7 +129,9 @@ legacy connect or listener prompt, or after finishing an automatic attempt.
 
 1. Read `status`. Require the exact current paired worker, native policy ON,
    `desktop_enabled=true` and `auto_enabled=true`, with no installation problem.
-   `WAITER_NOT_READY` is the expected pre-arm condition. If `waiter_ready=true`,
+   `WAITER_NOT_READY` is the expected pre-arm condition. A terminal receipt
+   awaiting Leader review can coexist with a free slot and a new listener.
+   If `waiter_ready=true`,
    report that it is ready and end; never start a duplicate. On any other
    blocked status, report the actual reason and stop.
 2. Start the `listen` command through this chat's native `run_command` as an
@@ -155,11 +157,16 @@ reading assigned source, running task commands or editing code. Never claim a
 different attempt or begin based solely on request text.
 
 Only a successful `begin` with `state=RUNNING` authorizes task work. Keep its
-`execution_ticket` privately available in this chat. Use the returned verified
-`request`, `kind`, `scope` and `baseline` as the assignment. READ means read and
-report; EDIT means edit only assigned files. Preserve other writers' changes
-and the user's Git index. Keep unresolved scope overlap for Leader review.
-Do not commit, push, reset or revert without task authorization.
+`execution_ticket` privately available in this chat. Read the verified
+`assignment.variant`, `assignment.capabilities`, `work_item_id`, snapshot and
+file scopes. Follow the corresponding managed contract in `agents/roles/`
+beside the skill. The request Markdown supplies the bounded objective.
+Use the matching role's read, edit and check permissions. A reviewer with
+`shell:checks` can run the specified checks and use the declared check outputs.
+Return the snapshot and actual evidence. Preserve other writers' changes
+and the user's Git index. Role instructions bind the assignment. Desktop
+tool permissions come from the current app session. Refrain from nested
+delegation, policy changes and scope changes.
 
 The result Markdown must state changed paths, checks and their outcomes,
 unresolved issues and any material limitations. For completion, failure or
@@ -179,7 +186,8 @@ tool or App closed. If the ticket/context is lost or resume fails, report the
 actual failure to the Leader for reconciliation.
 
 After a confirmed terminal receipt, read status and rearm the attached listener
-in this same chat when still allowed. A paused/unknown attempt must not rearm
-or release ownership. The Leader reviews the receipt and acknowledges/ closes
-the round through its own independent authority. User summaries may report
-the exact task/attempt and outcome, but must omit secrets and helper payloads.
+in this same chat when still allowed. A paused or unknown attempt keeps its
+slot. Other ready chats can work on independent assignments. The Leader
+reviews the receipt, acknowledges the attempt, then closes the work item and
+round when all review and reconciliation are complete. User summaries may
+report the task, attempt and outcome. Keep secrets and helper payloads private.

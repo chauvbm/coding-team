@@ -81,16 +81,15 @@ def guard(install_lock: Path) -> None:
     if not roots:
         return
     from ct_bridge_files import locate_workspace
-    from ct_bridge_store import Store
+    from ct_bridge_store import inspect_store
 
     for root in roots:
         paths = locate_workspace(Path(root))
         if paths.root.resolve().as_posix() != root:
             raise ValueError('registered Desktop worktree no longer resolves to its root: ' + root)
-        with Store(paths).read() as db:
-            if db is None:
-                continue
-            rows = db.execute('SELECT id FROM rounds WHERE closed_at IS NULL').fetchall()
-            if rows:
-                raise DesktopRoundOpen('DESKTOP_ROUND_OPEN: close and reconcile rounds before changing '
-                                       + root + ': ' + ', '.join(str(row['id']) for row in rows))
+        state = inspect_store(paths)
+        if state.open_rounds:
+            raise DesktopRoundOpen('DESKTOP_ROUND_OPEN: close and reconcile rounds before changing '
+                                   + root + ': ' + ', '.join(state.open_rounds))
+        if state.maintenance and state.version != 1:
+            raise ValueError('RECOVERY_IN_PROGRESS: complete Desktop store recovery before changing ' + root)

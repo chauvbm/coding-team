@@ -20,7 +20,8 @@ _COMMANDS = {
 ATTEMPT_OPERATIONS = ('publish', 'reoffer', 'grant-read', 'collect', 'cancel-pending',
                       'reconcile', 'ack', 'cleanup')
 OPERATIONS = ('open-round', 'close-round', 'register-native', 'bind-native', 'finish-native',
-              'wait-ready', *ATTEMPT_OPERATIONS)
+              'reserve-leader', 'finish-leader', 'complete-work-item', 'ledger-evidence',
+              'rollback-store', 'wait-ready', *ATTEMPT_OPERATIONS)
 _PAYLOAD_LIMIT = 3 * 1024 * 1024
 _MACHINE_REASON = re.compile(r'[A-Z][A-Z0-9_]{0,79}')
 
@@ -63,6 +64,7 @@ def _context(platform, workspace, source, env, home):
 
 
 def _runtime_view(ctx):
+    from ct_bridge_binding import BRIDGE_ABI
     # This identifies the actual installed entry that produced the status, rather than a candidate path.
     try:
         binding = ctx.own_binding()
@@ -71,7 +73,7 @@ def _runtime_view(ctx):
     helper = binding.skill_dir / 'scripts' / 'coding_team.py'
     return {'platform': binding.platform, 'scope': binding.scope, 'workspace': ctx.paths.root.as_posix(),
             'helper': helper.as_posix(), 'helper_sha256': hashlib.sha256(helper.read_bytes()).hexdigest(),
-            'bridge_abi': 1}
+            'bridge_abi': BRIDGE_ABI}
 
 
 def command(args, source, platform, env, home):
@@ -209,10 +211,14 @@ def bridge_command(args, source, env, home, stream):
         payload = _payload(stream, args.payload_stdin)
         operation = args.operation
         if operation == 'wait-ready':
-            fields = {'leader_epoch', 'pair_epoch', 'desktop_epoch', 'auto_epoch'}
+            fields = {'leader_epoch', 'platform', 'join_id', 'desktop_epoch', 'auto_epoch'}
             if (not args.payload_stdin or payload.keys() != fields
-                    or any(type(value) is not int or value < 0 for value in payload.values())
+                    or any(type(payload[name]) is not int or payload[name] < 0
+                           for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch'))
                     or payload['leader_epoch'] < 1
+                    or payload['platform'] != 'antigravity'
+                    or not isinstance(payload['join_id'], str) or not payload['join_id']
+                    or len(payload['join_id']) > 128
                     or args.task_id is not None or args.attempt is not None
                     or type(args.wait_seconds) is not int or not 0 <= args.wait_seconds <= 60):
                 _reject('INVALID_PAYLOAD')
@@ -222,7 +228,7 @@ def bridge_command(args, source, env, home, stream):
             from ct_bridge_control import wait_ready
 
             expected = LeaderRef(ctx.require_leader(), payload['leader_epoch'])
-            result = wait_ready(ctx, expected, pair_epoch=payload['pair_epoch'],
+            result = wait_ready(ctx, expected, platform=payload['platform'], join_id=payload['join_id'],
                                 desktop_epoch=payload['desktop_epoch'], auto_epoch=payload['auto_epoch'],
                                 wait_seconds=args.wait_seconds)
         elif operation == 'collect':
@@ -238,6 +244,8 @@ def bridge_command(args, source, env, home, stream):
             request = ctx.paths.data / key / f'attempt-{number}' / 'request.md'
             result.update(request_path=request.as_posix(), prompt=(
                 'Use skill coding-team-desktop-worker for this manual assignment. '
+                f'Use the bound chat {json.dumps(result.get("worker_label", result["worker_id"]), ensure_ascii=False)} '
+                f'(worker {json.dumps(result["worker_id"], ensure_ascii=False)}). '
                 f'Worktree {json.dumps(ctx.paths.root.as_posix(), ensure_ascii=False)}. '
                 f'Task {key}, attempt {number}. Request {json.dumps(request.as_posix(), ensure_ascii=False)}.'
             ))
@@ -268,19 +276,39 @@ def _mutate(ctx, args, payload):
     from ct_bridge_binding import LeaderRef
     import ct_bridge_control as control
 
-    actor = ctx.require_leader()
-    expected = LeaderRef(actor, payload.pop('leader_epoch', None))
+    operation = args.operation
+    if operation not in ATTEMPT_OPERATIONS and (args.task_id is not None or args.attempt is not None):
+        _reject('INVALID_PAYLOAD')
+    if operation == 'cleanup' and (args.task_id is None or args.attempt is not None):
+        _reject('INVALID_PAYLOAD')
+    if operation == 'publish' and (args.task_id is not None or args.attempt is not None):
+        _reject('INVALID_PAYLOAD')
+    payload = dict(payload)
+    epoch = payload.pop('leader_epoch', None)
+    if type(epoch) is not int or epoch < 1:
+        _reject('INVALID_PAYLOAD')
     fields = {
         'open-round': (), 'close-round': ('round_id', 'evidence'),
         'register-native': ('round_id', 'participant_id'),
         'bind-native': ('round_id', 'participant_id', 'handle'),
         'finish-native': ('round_id', 'participant_id', 'evidence'),
+        'reserve-leader': ('round_id', 'participant_id', 'assignment'),
+        'finish-leader': ('round_id', 'participant_id', 'evidence'),
+        'complete-work-item': ('round_id', 'work_item_id', 'outcome', 'snapshot', 'evidence'),
+        'ledger-evidence': ('round_id', 'participant_id', 'review_scope', 'snapshot'),
+        'rollback-store': (),
         'publish': ('round_id', 'request'), 'reoffer': ('mode',), 'grant-read': (),
-        'cancel-pending': (), 'reconcile': ('evidence',), 'ack': ('result_id',), 'cleanup': (),
-    }[args.operation]
-    if payload.keys() != set(fields) or args.wait_seconds != 0:
+        'cancel-pending': (), 'reconcile': ('evidence',), 'ack': ('result_id', 'evidence'), 'cleanup': (),
+    }[operation]
+    optional = {'register-native': {'assignment', 'observer', 'replaces_participant_id', 'transfer_evidence'},
+                'reserve-leader': {'replaces_participant_id', 'transfer_evidence'}}.get(operation, set())
+    if (not set(fields) <= payload.keys() or payload.keys() - set(fields) - optional
+            or args.wait_seconds != 0):
         _reject('INVALID_PAYLOAD')
-    operation = args.operation
+    if 'observer' in payload and type(payload['observer']) is not bool:
+        _reject('INVALID_PAYLOAD')
+    actor = ctx.require_leader()
+    expected = LeaderRef(actor, epoch)
     detail = tuple(payload[field] for field in fields)
     if operation == 'open-round':
         round_id = control.open_round(ctx, expected)
@@ -288,16 +316,27 @@ def _mutate(ctx, args, payload):
                 'leader_epoch': expected.epoch}
     if operation == 'publish':
         return attempts.publish(ctx, expected, payload['round_id'], _request(payload['request'], attempts.Request))
+    if operation == 'complete-work-item':
+        return control.complete_work_item(ctx, expected, **payload)
+    if operation == 'ledger-evidence':
+        return control.ledger_evidence(ctx, expected, **payload)
     if operation == 'cleanup':
         return attempts.cleanup(ctx, expected, args.task_id)
     module = attempts if operation in ATTEMPT_OPERATIONS else control
     prefix = (_key(args),) if module is attempts else ()
-    return getattr(module, operation.replace('-', '_'))(ctx, expected, *prefix, *detail)
+    kwargs = {field: payload[field] for field in optional if field in payload}
+    return getattr(module, operation.replace('-', '_'))(ctx, expected, *prefix, *detail, **kwargs)
 
 
 def _request(data, request_type):
-    names = {'publish_id', 'content', 'kind', 'mode', 'scope', 'baseline', 'task_id'}
-    if (not isinstance(data, dict) or data.keys() - names or 'publish_id' not in data
-            or not isinstance(data.get('content'), str)):
+    required = {'publish_id', 'content', 'mode', 'worker_id', 'assignment', 'baseline'}
+    optional = {'task_id', 'replaces_participant_id', 'transfer_evidence'}
+    if (not isinstance(data, dict) or not required <= data.keys() or data.keys() - required - optional
+            or not isinstance(data['content'], str) or not isinstance(data['assignment'], dict)
+            or not isinstance(data['baseline'], dict)):
         _reject('INVALID_REQUEST')
-    return request_type(**dict(data, content=data['content'].encode('utf-8')))
+    try:
+        content = data['content'].encode('utf-8')
+    except UnicodeError:
+        _reject('INVALID_REQUEST')
+    return request_type(**dict(data, content=content))

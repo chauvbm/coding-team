@@ -21,6 +21,9 @@ from ct_storage import LinkedPathError, reject_links
 
 MAX_FILE_BYTES = 1024 * 1024
 _IGNORE = b'# coding-team Desktop bridge v1; local transport only\n*\n'
+_RECOVERY_IGNORE = b'# coding-team Desktop bridge recovery; local archives only\n*\n'
+_RECOVERY_DIR = 'bridge-recovery'
+_RECOVERY_MARKER = 'rollback.json'
 _TASK = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
 _DEVICE = re.compile(r'(?:con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])\Z', re.I)
@@ -142,6 +145,13 @@ def locate_workspace(path: Path) -> WorkspacePaths:
 def _validate_paths(paths):
     if (not isinstance(paths, WorkspacePaths) or not isinstance(paths.root, Path)
             or not paths.root.is_absolute() or paths != locate_workspace(paths.root)):
+        raise BridgeError('INVALID_WORKSPACE_PATHS')
+
+
+def _validate_transport_paths(paths):
+    if (not isinstance(paths, WorkspacePaths) or not isinstance(paths.root, Path)
+            or not paths.root.is_absolute() or paths.data != paths.root / '.coding-team' / 'bridge'
+            or paths.db != paths.data / 'bridge.sqlite3'):
         raise BridgeError('INVALID_WORKSPACE_PATHS')
 
 
@@ -328,10 +338,7 @@ def check_plain_file(path, stop_at) -> bool:
 @contextmanager
 def database_guard(paths: WorkspacePaths):
     """Protect the SQLite location while a helper opens a local DB connection."""
-    if (not isinstance(paths, WorkspacePaths) or not isinstance(paths.root, Path)
-            or not paths.root.is_absolute() or paths.data != paths.root / '.coding-team' / 'bridge'
-            or paths.db != paths.data / 'bridge.sqlite3'):
-        raise BridgeError('INVALID_WORKSPACE_PATHS')
+    _validate_transport_paths(paths)
     with _Guard() as guard, ExitStack() as handles:
         try:
             guard.directory(paths.data)
@@ -354,11 +361,12 @@ def database_guard(paths: WorkspacePaths):
         yield present
 
 
-def _tracked(paths):
+def _tracked(paths, component=b'bridge'):
     entries = _git(paths.root, 'ls-files', '-z', '--', '.coding-team').split(b'\0')
+    directory = b'.coding-team/' + component
     for entry in entries:
         folded = entry.lower()
-        if folded in (b'.coding-team', b'.coding-team/bridge') or folded.startswith(b'.coding-team/bridge/'):
+        if folded in (b'.coding-team', directory) or folded.startswith(directory + b'/'):
             raise BridgeError('TRACKED_TRANSPORT')
 
 
@@ -366,6 +374,48 @@ def _ignored(paths, path):
     relative = path.relative_to(paths.root).as_posix()
     if not _git(paths.root, 'check-ignore', '--no-index', '--', relative, allowed=(0, 1)):
         raise BridgeError('TRANSPORT_NOT_IGNORED')
+
+
+@contextmanager
+def recovery_guard(paths: WorkspacePaths, *, create: bool = False):
+    """Pin the fixed, privately owned recovery root outside the v1 transport."""
+    _validate_transport_paths(paths)
+    root = paths.data.parent / _RECOVERY_DIR
+    with _Guard() as guard:
+        try:
+            guard.directory(root)
+        except FileNotFoundError:
+            if not create:
+                yield guard, None
+                return
+        except OSError as exc:
+            raise BridgeError('RECOVERY_UNAVAILABLE') from exc
+        _validate_paths(paths)
+        _tracked(paths, _RECOVERY_DIR.encode('ascii'))
+        ignore = root / '.gitignore'
+        try:
+            if create:
+                guard.directory(root.parent, create=True)
+                guard.directory(root, create=True)
+                if not guard.plain(ignore) and not any(root.iterdir()):
+                    guard.publish(ignore, _RECOVERY_IGNORE)
+            if guard.read(ignore, limit=len(_RECOVERY_IGNORE)) != _RECOVERY_IGNORE:
+                raise BridgeError('UNOWNED_RECOVERY')
+            _ignored(paths, root / _RECOVERY_MARKER)
+        except FileNotFoundError:
+            raise BridgeError('UNOWNED_RECOVERY') from None
+        except OSError as exc:
+            raise BridgeError('RECOVERY_UNAVAILABLE') from exc
+        yield guard, root
+
+
+def recovery_pending(paths: WorkspacePaths) -> bool:
+    """Any safe marker fences v2 writes until baseline recovery is finished."""
+    with recovery_guard(paths) as (guard, root):
+        try:
+            return root is not None and guard.plain(root / _RECOVERY_MARKER)
+        except OSError as exc:
+            raise BridgeError('RECOVERY_UNAVAILABLE') from exc
 
 
 def _validate_tree(paths, guard):

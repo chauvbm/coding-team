@@ -30,8 +30,9 @@ _RETIRED_SCRIPTS = {'ct_antigravity.py', 'ct_winjob.py', 'ct_external.py',
 _EXCLUDED_SCRIPTS = {'export_evaluation_inputs.py', 'build_runtime_package.py'} | _RETIRED_SCRIPTS
 _WORKER_SCRIPTS = ('ct_bridge_worker.py', 'ct_bridge_files.py', 'ct_bridge_store.py',
                    'ct_bridge_binding.py', 'ct_bridge_control.py', 'ct_bridge_attempts.py',
-                   'ct_bridge_install.py', 'ct_bridge_commands.py', 'ct_storage.py',
-                   'ct_platform.py', 'ct_policy.py')
+                   'ct_bridge_install.py', 'ct_bridge_commands.py', 'ct_bridge_roles.py',
+                   'ct_bridge_scopes.py', 'ct_bridge_upgrade.py', 'ct_storage.py', 'ct_platform.py', 'ct_policy.py',
+                   'ct_roles.py')
 _SHA = re.compile(r'[0-9a-f]{64}')
 _RECOVER_HINT = 'run `coding_team.py install --recover`'
 
@@ -308,6 +309,9 @@ def build_plan(source_root, cfg, *, scope, env, home, project_dir=None, default=
         resources = [('SKILL.md', source_root / 'workers/antigravity/SKILL.md'),
                      ('LICENSE', source_root / 'LICENSE')]
         resources += [('scripts/' + name, source_root / 'scripts' / name) for name in _WORKER_SCRIPTS]
+        role_catalog = source_root / 'agents' / 'roles'
+        resources += [('agents/roles/' + path.name, path)
+                      for path in sorted(role_catalog.iterdir()) if path.is_file()]
         resources.append(('platforms/antigravity.json', source_root / 'platforms/antigravity.json'))
         files = [('skill_dir', rel, path.read_bytes().replace(b'\r\n', b'\n'))
                  for rel, path in resources]
@@ -360,7 +364,9 @@ def _check_identity(manifest, platform, scope, skill_dir):
 
 
 def _bridge_binding(paths):
-    result = {'bridge_abi': 1, 'component': paths['bridge_component'],
+    from ct_bridge_binding import BRIDGE_ABI
+
+    result = {'bridge_abi': BRIDGE_ABI, 'component': paths['bridge_component'],
               'install_lock': Path(paths['lock_file']).resolve().as_posix()}
     if paths['bridge_component'] == 'leader':
         result['state_path'] = Path(paths['state_file']).resolve().as_posix()
@@ -371,6 +377,10 @@ def _check_bridge_binding(record, paths):
     if 'bridge_component' in paths and record:
         expected = _bridge_binding(paths)
         # Legacy manifests may have state/lock bindings but no Desktop ABI yet.
+        current_version = expected.pop('bridge_abi')
+        version = record.get('bridge_abi', current_version)
+        if type(version) is not int or version not in (1, current_version):
+            raise ValueError('unsupported Desktop component ABI for this installer')
         if any(key in record and record[key] != value for key, value in expected.items()):
             raise ValueError('installation is bound to a different Codex policy state or install lock '
                              'or Desktop component; use the existing installation configuration')

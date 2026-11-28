@@ -55,7 +55,7 @@ When reusing an agent, explicitly change its stage and send the latest plan, own
 
 ## Handoff evidence
 
-An [Antigravity Desktop worker's native representative](antigravity-desktop.md#assign-and-collect) receives one attempt key, its canonical worktree and a short-lived read grant. The representative calls the installed read-only collect operation and returns the attempt state, result ID and digest through the native subagent callback. Leader owns acknowledgment, review and closure. Role separation is ADVISORY. The helper enforces grant scope and expiry.
+An [Antigravity Desktop worker](antigravity-desktop.md#assign-and-collect) uses the same role contract and reports the actual scope, snapshot and evidence. For an existing Desktop chat, role-level restrictions are ADVISORY. The bridge enforces identity, assignment admission, reservations among bridge participants and grant scope/expiry. A native receipt observer receives only the canonical worktree, the attempt keys it follows and a short-lived grant for each key. It returns state, result ID and digest through its callback. Leader can collect directly and owns acknowledgment, independent review and closure.
 
 Return a concise result with role/variant, work-item and canonical issue IDs, inspected snapshot and paths, findings, changed files, actual checks and remaining limitations. Include the Spec/Plan pair, reviewed scope and explicit verdict for plan reviews. A reassessment states which finding changed and what evidence justifies it; silence is not acceptance.
 

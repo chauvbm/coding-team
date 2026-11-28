@@ -6,10 +6,10 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
-import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 try:
@@ -25,12 +25,13 @@ class BridgeControlTests(unittest.TestCase):
         import ct_bridge_files as files
         import ct_policy
         self.binding = binding
-        self.base = Path(__file__).resolve().parents[1] / ('.ct-control-' + uuid.uuid4().hex)
-        self.base.mkdir()
-        self.addCleanup(self.cleanup_fixture)
+        self.base = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='ct-control-'))).resolve()
         self.root = self.base / 'worktree'
         self.root.mkdir()
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                        'commit', '--allow-empty', '-qm', 'baseline'], check=True, capture_output=True)
+        self.head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
         self.paths = files.locate_workspace(self.root)
         self.home = self.base / 'home'
         self.custom = self.home / 'custom-codex'
@@ -46,17 +47,6 @@ class BridgeControlTests(unittest.TestCase):
         self.b = self.context('codex', 'chat-b')
         self.worker = self.context('antigravity', 'worker-a', component='worker')
 
-    def cleanup_fixture(self):
-        # Windows scanners may briefly hold a directory after Git exits.
-        for attempt in range(30):
-            try:
-                shutil.rmtree(self.base)
-                return
-            except PermissionError:
-                if attempt == 29:
-                    raise
-                time.sleep(.1)
-
     def context(self, platform, chat, component='leader'):
         env = {'CODEX_HOME': str(self.custom)}
         if chat:
@@ -70,10 +60,13 @@ class BridgeControlTests(unittest.TestCase):
         skill = (self.home / '.agents/skills/coding-team' if component == 'leader' else
                  self.home / '.gemini/config/skills/coding-team-desktop-worker')
         names = ('ct_bridge_binding', 'ct_bridge_files', 'ct_bridge_store', 'ct_platform', 'ct_storage',
-                 'ct_policy', 'ct_bridge_control', 'ct_bridge_attempts', 'ct_bridge_install', 'ct_bridge_commands')
+                 'ct_policy', 'ct_bridge_control', 'ct_bridge_attempts', 'ct_bridge_install', 'ct_bridge_commands',
+                 'ct_bridge_roles', 'ct_bridge_scopes', 'ct_bridge_upgrade', 'ct_roles')
         names += ('coding_team', 'ct_bridge_cli') if component == 'leader' else ('ct_bridge_worker',)
         files = {'SKILL.md': b'fixture skill\n'}
         files.update({f'scripts/{name}.py': f'# fixture {name}\n'.encode() for name in names})
+        files.update({f'agents/roles/{path.name}': path.read_bytes() for path in
+                      (Path(__file__).resolve().parents[1] / 'agents/roles').iterdir() if path.is_file()})
         files[f'platforms/{platform}.json'] = (Path(__file__).resolve().parents[1] / 'platforms' / f'{platform}.json').read_bytes()
         for relative, data in files.items():
             path = skill / relative
@@ -81,7 +74,7 @@ class BridgeControlTests(unittest.TestCase):
             path.write_bytes(data)
         lock = (self.custom / 'coding-team/install.lock' if component == 'leader' else
                 self.home / '.gemini/antigravity/coding-team-desktop-worker/install.lock')
-        record = {'schema_version': 1, 'bridge_abi': 1, 'component': component, 'platform': platform,
+        record = {'schema_version': 1, 'bridge_abi': 2, 'component': component, 'platform': platform,
                   'scope': 'user', 'install_lock': lock.as_posix(),
                   'files': {'skill_dir': {rel: hashlib.sha256(data).hexdigest() for rel, data in files.items()}}}
         if component == 'leader':
@@ -102,7 +95,19 @@ class BridgeControlTests(unittest.TestCase):
 
     def group(self):
         with control.Store(self.paths).read() as db:
-            return dict(db.execute('SELECT * FROM group_state').fetchone())
+            row = dict(db.execute('SELECT * FROM group_state').fetchone())
+            peer = db.execute('SELECT * FROM peers').fetchone()
+            worker = db.execute('SELECT chat_id FROM workers WHERE retired_at IS NULL ORDER BY registered_at').fetchone()
+            return {**row, **(dict(peer) if peer else {}), 'desktop_enabled': peer['enabled'] if peer else 0,
+                    'worker_chat': worker['chat_id'] if worker else None}
+
+    def snapshot(self):
+        return {'head': self.head, 'inputs': {}}
+
+    def assignment(self, identifier, **fields):
+        return {'variant': 'ct-researcher', 'work_item_id': identifier, 'snapshot': self.snapshot(),
+                'depends_on': {}, 'read_paths': [], 'write_paths': [], 'test_paths': [], 'check_outputs': [],
+                **fields}
 
     def test_configure_implicit_leader_and_modes(self):
         view = self.configure('auto_off')
@@ -110,19 +115,77 @@ class BridgeControlTests(unittest.TestCase):
         self.assertTrue(view['desktop_enabled'])
         self.assertFalse(view['auto_enabled'])
         first = self.group()
-        self.assertRegex(first['invite_hash'], r'^listen:[0-9a-f]{32}$')
+        self.assertRegex(first['join_id'], r'^[0-9a-f]{32}$')
         self.assertNotIn('listen:', json.dumps(view))
         again = self.configure('on')
-        self.assertEqual(again['pair_epoch'], first['pair_epoch'])
-        self.assertEqual(self.group()['invite_hash'], first['invite_hash'])
+        self.assertEqual(again['join_id'], first['join_id'])
+        self.assertEqual(self.group()['join_id'], first['join_id'])
         self.assertTrue(control.join_peer(self.worker)['ok'])
         paired = self.group()
         auto = self.configure()
         self.assertTrue(auto['auto_enabled'])
-        self.assertEqual(auto['pair_epoch'], paired['pair_epoch'])
+        self.assertEqual(auto['join_id'], paired['join_id'])
         self.assertTrue(self.configure('on')['auto_enabled'])
         self.assertFalse(self.configure('auto_off')['auto_enabled'])
         self.assertEqual(self.group()['worker_chat'], 'worker-a')
+
+    def test_invite_admits_many_tabs_without_replacing_existing_worker(self):
+        view = self.configure('auto_off')
+        first = control.join_peer(self.worker)
+        second = control.join_peer(self.context('antigravity', 'worker-b', 'worker'))
+        self.assertTrue(first['ok'], first)
+        self.assertTrue(second['ok'], second)
+        self.assertIn('worker_id', first, 'a multi-worker registration needs its own ID')
+        self.assertNotEqual(first['worker_id'], second['worker_id'])
+        self.assertEqual(control.join_peer(self.worker)['worker_id'], first['worker_id'])
+        self.assertEqual(self.configure('on')['join_id'], view['join_id'])
+
+    def test_work_item_admission_checks_exact_accepted_dependency_and_current_owner(self):
+        ref = self.select()
+        round_id = control.open_round(self.a, ref)
+        root = self.assignment('prerequisite')
+        self.assertTrue(control.register_native(self.a, ref, round_id, 'first', root)['ok'])
+        duplicate = control.register_native(self.a, ref, round_id, 'other', root)
+        self.assertEqual(duplicate['reason'], 'WORK_ITEM_OWNED')
+        pending = self.assignment('dependent', depends_on={'prerequisite': 'missing'})
+        self.assertEqual(control.register_native(self.a, ref, round_id, 'second', pending)['reason'], 'DEPENDENCY_NOT_READY')
+        self.assertTrue(control.bind_native(self.a, ref, round_id, 'first', 'handle-first')['ok'])
+        self.assertTrue(control.finish_native(self.a, ref, round_id, 'first', 'verified')['ok'])
+        accepted = control.complete_work_item(self.a, ref, round_id, 'prerequisite', outcome='accepted',
+                                               snapshot=self.snapshot(), evidence='verified')
+        self.assertTrue(accepted['ok'], accepted)
+        pending['depends_on']['prerequisite'] = accepted['acceptance_id']
+        self.assertTrue(control.register_native(self.a, ref, round_id, 'second', pending)['ok'])
+
+    def test_ledger_projection_uses_runtime_identity_after_reregistration(self):
+        import ct_bridge_attempts as attempts
+        from ct_bridge_files import AttemptKey
+        active = self.configure('on')
+        ref = self.binding.LeaderRef(self.a.actor, active['leader_epoch'])
+        joined = control.join_peer(self.worker)
+        round_id = control.open_round(self.a, ref)
+        first = attempts.publish(self.a, ref, round_id, attempts.Request('one', 'manual', joined['worker_id'],
+            self.assignment('first'), {}, b'Inspect this checkout'))
+        key = AttemptKey(first['task_id'], 1)
+        started = attempts.begin(self.worker, key, None)
+        result = attempts.finish(self.worker, key, started['execution_ticket'], 'COMPLETED', b'First result')
+        self.assertTrue(attempts.ack(self.a, ref, key, result['result_id'], {
+            'task_id': key.task_id, 'attempt_no': 1, 'snapshot': self.snapshot(),
+            'summary': 'Verified', 'scope_verified': True})['ok'])
+        observed = control.ledger_evidence(self.a, ref, round_id, first['participant_id'], review_scope=None, snapshot=self.snapshot())
+        self.assertTrue(control.complete_work_item(self.a, ref, round_id, 'first', outcome='accepted',
+                                                   snapshot=self.snapshot(), evidence='Verified')['ok'])
+        self.assertTrue(control.close_round(self.a, ref, round_id, 'Complete')['ok'])
+        self.configure('off')
+        self.configure('on')
+        second = control.join_peer(self.worker)
+        self.assertNotEqual(second['worker_id'], joined['worker_id'])
+        next_round = control.open_round(self.a, ref)
+        next_attempt = attempts.publish(self.a, ref, next_round, attempts.Request('two', 'manual', second['worker_id'],
+            self.assignment('second'), {}, b'Inspect the same checkout'))
+        next_observed = control.ledger_evidence(self.a, ref, next_round, next_attempt['participant_id'],
+                                                review_scope=None, snapshot=self.snapshot())
+        self.assertEqual(observed['actor_id'], next_observed['actor_id'])
 
     def test_activate_during_drain_keeps_result_authority(self):
         for state in ('RUNNING', 'NEEDS_USER', 'OUTCOME_UNKNOWN', 'COMPLETED'):
@@ -151,7 +214,7 @@ class BridgeControlTests(unittest.TestCase):
                 self.assertTrue(enabled['ok'], enabled)
                 self.assertFalse(self.group()['auto_enabled'])
                 self.assertIsNone(self.group()['worker_chat'])
-                self.assertGreater(self.group()['pair_epoch'], preserved['pair_epoch'])
+                self.assertGreater(self.group()['desktop_epoch'], preserved['desktop_epoch'])
 
     def test_join_only_matching_current_invite(self):
         self.assertTrue(self.configure()['ok'])
@@ -164,16 +227,16 @@ class BridgeControlTests(unittest.TestCase):
             self.assertEqual(control.join_peer(self.worker)['reason'], 'EXPIRED')
             renewed = self.configure()
             self.assertTrue(renewed['ok'])
-            marker = self.group()['invite_hash']
+            marker = self.group()['join_id']
             self.assertFalse(control.connect(self.worker, marker)['ok'])
             self.assertTrue(control.join_peer(self.worker)['ok'])
             self.assertTrue(control.join_peer(self.worker)['ok'])
             other = self.context('antigravity', 'worker-b', 'worker')
-            self.assertEqual(control.join_peer(other)['reason'], 'WRONG_WORKER')
+            self.assertTrue(control.join_peer(other)['ok'])
             self.assertEqual(control.join_peer(self.context('antigravity', None, 'worker'))['reason'], 'UNKNOWN_CHAT')
         ref = self.binding.LeaderRef(self.a.actor, self.group()['leader_epoch'])
         ticket = control.invite(self.a, ref)['ticket']
-        self.assertEqual(control.join_peer(self.worker)['reason'], 'NO_INVITE')
+        self.assertTrue(control.join_peer(self.worker)['ok'])
         self.assertTrue(control.connect(self.worker, ticket)['ok'])
 
     def test_join_race_and_stale_observation(self):
@@ -181,13 +244,17 @@ class BridgeControlTests(unittest.TestCase):
         # Change the authority at the same manifest location between observation
         # and the real lock acquisition. A stale listen cannot join the new chat.
         from contextlib import contextmanager
-        real = control._guard
+        real = control.binding.locked_bindings
+        fired = False
         @contextmanager
-        def raced(ctx, **kwargs):
-            self.assertTrue(self.configure(ctx=self.b)['ok'])
-            with real(ctx, **kwargs) as result:
+        def raced(*args, **kwargs):
+            nonlocal fired
+            if not fired:
+                fired = True
+                self.assertTrue(self.configure(ctx=self.b)['ok'])
+            with real(*args, **kwargs) as result:
                 yield result
-        with mock.patch.object(control, '_guard', raced):
+        with mock.patch.object(control.binding, 'locked_bindings', raced):
             self.assertEqual(control.join_peer(self.worker)['reason'], 'STALE_INVITE')
         gate = threading.Barrier(2)
         results = []
@@ -201,8 +268,8 @@ class BridgeControlTests(unittest.TestCase):
         for thread in threads:
             thread.join(10)
             self.assertFalse(thread.is_alive())
-        self.assertEqual(sum(result['ok'] for result in results), 1, results)
-        self.assertIn(next(result['reason'] for result in results if not result['ok']), ('WRONG_WORKER', 'STALE_INVITE'))
+        self.assertTrue(all(result['ok'] for result in results), results)
+        self.assertEqual(len({result['worker_id'] for result in results}), 2)
 
     def test_connection_status_by_local_role(self):
         self.configure('auto_off')
@@ -235,7 +302,7 @@ class BridgeControlTests(unittest.TestCase):
     def test_wait_ready_only_for_current_activation(self):
         view = self.configure()
         ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
-        epochs = {name: view[name] for name in ('pair_epoch', 'desktop_epoch', 'auto_epoch')}
+        epochs = {name: view[name] for name in ('platform', 'join_id', 'desktop_epoch', 'auto_epoch')}
         before = self.paths.db.read_bytes()
         waiting = control.wait_ready(self.a, ref, **epochs, wait_seconds=0)
         self.assertEqual(waiting['state'], 'WAITING', waiting)
@@ -252,16 +319,16 @@ class BridgeControlTests(unittest.TestCase):
     def test_wait_ready_observes_waiter_policy_and_expiry_without_writes(self):
         from dataclasses import asdict
         view = self.configure()
-        control.join_peer(self.worker)
+        joined = control.join_peer(self.worker)
         ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
-        epochs = {name: view[name] for name in ('pair_epoch', 'desktop_epoch', 'auto_epoch')}
+        epochs = {name: view[name] for name in ('platform', 'join_id', 'desktop_epoch', 'auto_epoch')}
         def listener_appears(_):
             with control.Store(self.paths).write() as db:
                 row = db.execute('SELECT * FROM group_state').fetchone()
                 stamp = control._policy(self.a.own_binding(), row)
-                db.execute('''INSERT INTO waiter(id,nonce,leader_epoch,pair_epoch,auto_epoch,
-                    desktop_epoch,policy_stamp,expires_at) VALUES(1,'private',?,?,?,?,?,?)''',
-                    (row['leader_epoch'], row['pair_epoch'], row['auto_epoch'], row['desktop_epoch'],
+                db.execute('''INSERT INTO waiter(worker_id,nonce_hash,leader_epoch,auto_epoch,
+                    desktop_epoch,policy_stamp,expires_at) VALUES(?,'private',?,?,?,?,?)''',
+                    (joined['worker_id'], row['leader_epoch'], view['auto_epoch'], view['desktop_epoch'],
                      json.dumps(asdict(stamp), sort_keys=True, separators=(',', ':')), time.time() + 30))
         with mock.patch.object(control.time, 'sleep', listener_appears):
             ready = control.wait_ready(self.a, ref, **epochs, wait_seconds=1)
@@ -299,18 +366,22 @@ class BridgeControlTests(unittest.TestCase):
         import ct_bridge_attempts as attempts
         from ct_bridge_files import AttemptKey
         view = self.configure('on')
-        self.assertTrue(control.join_peer(self.worker)['ok'])
+        worker = control.join_peer(self.worker)
+        other = self.context('antigravity', 'worker-b', 'worker')
+        joined_other = control.join_peer(other)
         ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
         rid = control.open_round(self.a, ref)
-        first = attempts.publish(self.a, ref, rid, attempts.Request('running', b'private request'))
-        second = attempts.publish(self.a, ref, rid, attempts.Request('pending', b'pending request'))
+        first = attempts.publish(self.a, ref, rid, attempts.Request('running', 'manual', worker['worker_id'],
+                                 self.assignment('running'), {}, b'private request'))
+        second = attempts.publish(self.a, ref, rid, attempts.Request('pending', 'manual', joined_other['worker_id'],
+                                  self.assignment('pending'), {}, b'pending request'))
         key = AttemptKey(first['task_id'], first['attempt_no'])
         pending = AttemptKey(second['task_id'], second['attempt_no'])
         begun = attempts.begin(self.worker, key, None)
         self.assertTrue(begun['ok'], begun)
-        self.assertEqual(control.connection_status(self.worker)['connections'][0]['readiness'], 'WORKING')
+        self.assertEqual(control.connection_status(self.worker)['connections'][0]['readiness'], 'RUNNING')
         self.assertTrue(self.configure('off')['ok'])
-        self.assertFalse(attempts.begin(self.worker, pending, None)['ok'])
+        self.assertFalse(attempts.begin(other, pending, None)['ok'])
         self.assertEqual(self.configure('on')['reason'], 'LEADER_BUSY')
         finished = attempts.finish(self.worker, key, begun['execution_ticket'], 'COMPLETED', b'private final result')
         self.assertTrue(finished['ok'], finished)
@@ -318,7 +389,13 @@ class BridgeControlTests(unittest.TestCase):
         status = json.dumps(control.connection_status(self.a))
         self.assertNotIn('private', status)
         self.assertNotIn(begun['execution_ticket'], status)
-        self.assertTrue(attempts.ack(self.a, ref, key, finished['result_id'])['ok'])
+        self.assertTrue(attempts.ack(self.a, ref, key, finished['result_id'], {
+            'task_id': key.task_id, 'attempt_no': 1, 'snapshot': self.snapshot(),
+            'summary': 'Verified', 'scope_verified': True})['ok'])
+        for item, outcome in (('running', 'accepted'), ('pending', 'cancelled')):
+            result = control.complete_work_item(self.a, ref, rid, item, outcome=outcome,
+                                                snapshot=self.snapshot(), evidence='Reviewed')
+            self.assertTrue(result['ok'], result)
         self.assertTrue(control.close_round(self.a, ref, rid, 'review complete')['ok'])
         self.assertTrue(self.configure('on')['ok'])
         self.assertIsNone(self.group()['worker_chat'])
@@ -329,7 +406,7 @@ class BridgeControlTests(unittest.TestCase):
         with mock.patch.object(control, 'Store', lambda paths: real(paths, clock=lambda: clock[0])):
             view = self.configure()
             ref = self.binding.LeaderRef(self.a.actor, view['leader_epoch'])
-            epochs = {name: view[name] for name in ('pair_epoch', 'desktop_epoch', 'auto_epoch')}
+            epochs = {name: view[name] for name in ('platform', 'join_id', 'desktop_epoch', 'auto_epoch')}
             clock[0] = 1600.0
             before = self.paths.db.read_bytes()
             self.assertEqual(control.wait_ready(self.a, ref, **epochs, wait_seconds=60)['state'], 'EXPIRED')
@@ -459,14 +536,21 @@ class BridgeControlTests(unittest.TestCase):
 
     def attempt_fixture(self, ref, rid, state='WAITING_FOR_USER', mode='manual', task='CT-001'):
         with control.Store(self.paths).write() as db:
-            group = db.execute('SELECT * FROM group_state').fetchone()
-            db.execute('INSERT INTO tasks(id,round_id,pair_epoch,worker_platform,worker_chat) VALUES(?,?,?,?,?)',
-                       (task, rid, group['pair_epoch'], 'antigravity', 'worker-a'))
-            db.execute('''INSERT INTO attempts(task_id,attempt_no,publish_id,state,mode,kind,request_sha256,
-                request_size,scope,baseline,desktop_epoch,auto_epoch,pair_epoch,leader_epoch,policy_stamp,created_at)
-                VALUES(?,1,?,?,?,'READ',?,0,'[]','{}',?,?,?,?,?,1000)''',
-                (task, task, state, mode, '0' * 64, group['desktop_epoch'], group['auto_epoch'],
-                 group['pair_epoch'], ref.epoch, '{}'))
+            db.execute("INSERT OR IGNORE INTO peers(platform) VALUES ('antigravity')")
+            peer = db.execute('SELECT * FROM peers').fetchone()
+            worker = db.execute('SELECT worker_id FROM workers WHERE chat_id=? AND retired_at IS NULL',
+                                ('worker-a' if task != 'CT-002' and task != 'CT-003' else task,)).fetchone()
+            worker_id = worker['worker_id'] if worker else 'fixture-' + task
+            if worker is None:
+                db.execute("INSERT INTO workers(worker_id,platform,chat_id,manifest,leader_epoch,registered_at) "
+                           "VALUES (?,'antigravity',?,?,?,1)", (worker_id, task, self.worker_manifest.as_posix(), ref.epoch))
+            db.execute("INSERT INTO participants(round_id,participant_id,executor,worker_id,finished_at) "
+                       "VALUES (?,?,'desktop',?,1000)", (rid, task, worker_id))
+            db.execute('INSERT INTO tasks(id,round_id,participant_id,worker_id) VALUES(?,?,?,?)', (task, rid, task, worker_id))
+            db.execute('''INSERT INTO attempts(task_id,attempt_no,worker_id,publish_id,state,mode,kind,request_sha256,
+                request_size,scope,baseline,desktop_epoch,auto_epoch,leader_epoch,policy_stamp,created_at)
+                VALUES(?,1,?,?,?,?,'READ',?,0,'[]','{}',?,?,?,?,1000)''',
+                (task, worker_id, task, state, mode, '0' * 64, peer['desktop_epoch'], peer['auto_epoch'], ref.epoch, '{}'))
 
     def test_pending_review_and_unknown_keep_leader_busy(self):
         ref = self.select()

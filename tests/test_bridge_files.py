@@ -75,6 +75,43 @@ class BridgeFileTests(unittest.TestCase):
             files.read_file(self.paths, self.key, 'request', '0' * 64)
         self.assertFalse((self.root / '.coding-team').exists())
 
+    def test_recovery_marker_lives_in_owned_ignored_sibling(self):
+        self.assertFalse(files.recovery_pending(self.paths))
+        self.assertFalse(self.paths.data.parent.exists())
+        with files.recovery_guard(self.paths, create=True) as (guard, root):
+            self.assertEqual(root, self.root / '.coding-team' / 'bridge-recovery')
+            self.assertEqual(self.git('check-ignore', (root / 'rollback.json').relative_to(self.root).as_posix()).strip(),
+                             b'.coding-team/bridge-recovery/rollback.json')
+            guard.publish(root / 'rollback.json', b'{}')
+        self.assertTrue(files.recovery_pending(self.paths))
+        files.verify_layout(self.paths, create=True)
+
+    def test_recovery_checks_index_before_opening_artifacts(self):
+        with files.recovery_guard(self.paths, create=True) as (_, root):
+            marker = root / 'rollback.json'
+            marker.write_bytes(b'preserve indexed file')
+        self.git('add', '-f', '.coding-team/bridge-recovery/rollback.json')
+        with self.assertRaises(files.BridgeError):
+            files.recovery_pending(self.paths)
+        self.assertEqual(marker.read_bytes(), b'preserve indexed file')
+
+    def test_recovery_does_not_adopt_existing_files_or_hardlinks(self):
+        root = self.root / '.coding-team' / 'bridge-recovery'
+        root.mkdir(parents=True)
+        user_file = root / 'user.txt'
+        user_file.write_bytes(b'preserve local file')
+        with self.assertRaises(files.BridgeError), files.recovery_guard(self.paths, create=True):
+            pass
+        self.assertEqual(user_file.read_bytes(), b'preserve local file')
+        user_file.unlink()
+        with files.recovery_guard(self.paths, create=True) as (_, recovery):
+            outside = self.fixture / 'outside-marker'
+            outside.write_bytes(b'preserve linked file')
+            os.link(outside, recovery / 'rollback.json')
+        with self.assertRaises(files.BridgeError):
+            files.recovery_pending(self.paths)
+        self.assertEqual(outside.read_bytes(), b'preserve linked file')
+
     def test_layout_is_owned_ignored_and_preserves_user_ignore(self):
         original = b'# fixture user ignore\nkeep-me\n'
         (self.root / '.gitignore').write_bytes(original)

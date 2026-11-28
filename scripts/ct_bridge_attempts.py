@@ -1,11 +1,7 @@
-"""Local Desktop attempt protocol. Tokens are returned only to their helper caller.
-
-No operation launches an application or performs work on the assigned sources.
-SQLite records authority; immutable UTF-8 files carry requests and final results.
-"""
+"""Worker-specific attempt authority with immutable request and receipt files."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 import hashlib
 import hmac
 import json
@@ -14,36 +10,44 @@ import secrets
 import time
 import uuid
 
-from ct_bridge_files import (AttemptKey, BridgeError, cleanup_task, publish_file, read_file,
-                             validate_relative_path)
+from ct_bridge_files import (AttemptKey, BridgeError, check_plain_file, cleanup_task,
+                             publish_file, read_file, validate_relative_path)
 from ct_bridge_store import Store
 import ct_bridge_control as control
+import ct_bridge_roles as roles
+import ct_bridge_scopes as scopes
 import ct_policy
 
 TERMINAL = frozenset(('COMPLETED', 'FAILED', 'CANCELED'))
 ACTIVE = frozenset(('RUNNING', 'NEEDS_USER', 'OUTCOME_UNKNOWN'))
-PENDING = frozenset(('PUBLISHING', 'WAITING_FOR_USER', 'QUEUED', 'CLAIMED', 'REVOKED'))
+PENDING = frozenset(('PUBLISHING', 'WAITING_FOR_USER', 'QUEUED', 'CLAIMED'))
 WAITER_SECONDS = 15
 CLAIM_SECONDS = 60
 GRANT_SECONDS = 600
 MAX_BYTES = 1048576
+_HEARTBEAT_SECONDS = 4
+_IDLE_INTERVAL = .25
 
 
 @dataclass(frozen=True)
 class Request:
     publish_id: str
+    mode: str
+    worker_id: str
+    assignment: dict
+    baseline: dict
     content: bytes
-    kind: str = 'READ'
-    mode: str = 'manual'
-    scope: tuple[str, ...] = ()
-    baseline: dict = field(default_factory=dict)
     task_id: str | None = None
+    replaces_participant_id: str | None = None
+    transfer_evidence: dict | None = None
 
 
 def _json(value):
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'),
-                          allow_nan=False)
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+                             allow_nan=False)
+        _bytes(encoded.encode('utf-8'))
+        return encoded
     except (TypeError, ValueError, UnicodeError) as exc:
         raise BridgeError('INVALID_INPUT') from exc
 
@@ -63,9 +67,9 @@ def _hash(value):
 
 
 def _token_hash(token):
-    if not isinstance(token, str) or not token or len(token) > 256:
+    if not isinstance(token, str) or not token or len(token) > 256 or not token.isascii():
         return ''
-    return _hash(token.encode('utf-8'))
+    return _hash(token.encode('ascii'))
 
 
 def _matches(token, digest):
@@ -73,39 +77,67 @@ def _matches(token, digest):
 
 
 def _view(row=None, *, ok=True, state=None, reason=None, **extra):
-    if row is not None and 'cleaned_at' in row.keys() and row['cleaned_at'] is not None:
-        return {'ok':False,'state':'CLEANED','reason':'TASK_CLEANED',
-                'task_id':row['task_id'],'attempt_no':row['attempt_no']}
-    result = {'ok': ok, 'state': state or (row['state'] if row is not None else 'UNCONFIGURED'),
-              'reason': reason}
+    view = {'ok': ok, 'state': state or (row['state'] if row is not None else 'REJECTED'),
+            'reason': reason}
     if row is not None:
-        for name in ('task_id', 'attempt_no', 'round_id', 'leader_epoch', 'result_id',
-                     'result_sha256', 'request_sha256'):
+        for name in ('task_id', 'attempt_no', 'round_id', 'participant_id', 'worker_id',
+                     'work_item_id', 'role_variant', 'leader_epoch', 'contract_digest',
+                     'result_id', 'result_sha256', 'request_sha256', 'mode', 'kind'):
             if name in row.keys() and row[name] is not None:
-                result[name] = row[name]
-        if reason is None and row['reason'] is not None:
-            result['reason'] = row['reason']
-    result.update(extra)
-    return result
+                view[name] = row[name]
+        if 'worker_id' in view:
+            view['worker_label'] = 'agy-' + view['worker_id']
+        if row['assignment'] is not None:
+            assignment = json.loads(row['assignment'])
+            view.update(role=row['role_variant'].removesuffix('-verify'),
+                        assignment=assignment, snapshot=assignment['snapshot'],
+                        verified_model='unverified', limits='ADVISORY')
+        if row['cleaned_at'] is not None:
+            view.update(ok=False, state='CLEANED', reason='TASK_CLEANED')
+            return view
+        if reason is None:
+            view['reason'] = row['reason']
+    view.update(extra)
+    return view
 
 
 def _group(db):
     return db.execute('SELECT * FROM group_state WHERE id=1').fetchone()
 
 
+def _peer(db, worker):
+    return db.execute('SELECT * FROM peers WHERE platform=?', (worker['platform'],)).fetchone()
+
+
+def _validate_task_id(task_id):
+    validate_relative_path(task_id)
+    if '/' in task_id:
+        raise BridgeError('INVALID_ATTEMPT')
+
+
+def _validate_key(key):
+    if not isinstance(key, AttemptKey) or type(key.attempt_no) is not int or not 0 < key.attempt_no < 2**31:
+        raise BridgeError('INVALID_ATTEMPT')
+    _validate_task_id(key.task_id)
+
+
 def _attempt(db, key):
-    if not isinstance(key, AttemptKey):
-        raise BridgeError('INVALID_ATTEMPT')
-    # Validate keys even when there is no file yet.
-    validate_relative_path(key.task_id)
-    if ('/' in key.task_id or type(key.attempt_no) is not int
-            or not 0 < key.attempt_no < 2**31):
-        raise BridgeError('INVALID_ATTEMPT')
-    return db.execute('SELECT a.*,t.round_id,t.worker_platform,t.worker_chat,t.cleaned_at, '
-                      'r.closed_at FROM attempts a JOIN tasks t ON t.id=a.task_id '
-                      'JOIN rounds r ON r.id=t.round_id '
-                      'WHERE a.task_id=? AND a.attempt_no=?',
-                      (key.task_id, key.attempt_no)).fetchone()
+    _validate_key(key)
+    return db.execute(
+        'SELECT a.*,t.round_id,t.participant_id,t.cleaned_at,p.work_item_id,p.role_variant,'
+        'r.closed_at FROM attempts a JOIN tasks t ON t.id=a.task_id '
+        'JOIN rounds r ON r.id=t.round_id LEFT JOIN participants p '
+        'ON p.round_id=t.round_id AND p.participant_id=t.participant_id '
+        'WHERE a.task_id=? AND a.attempt_no=?',
+        (key.task_id, key.attempt_no)).fetchone()
+
+
+def _key(row):
+    return AttemptKey(row['task_id'], row['attempt_no'])
+
+
+def _holder(row):
+    return scopes.ScopeHolder(row['round_id'], row['participant_id'], _key(row))
 
 
 def _set(db, key, **values):
@@ -114,537 +146,730 @@ def _set(db, key, **values):
                (*values.values(), key.task_id, key.attempt_no))
 
 
-def _stamp(binding, chat_id):
-    stamp = ct_policy.policy_stamp(binding.policy_path, chat_id, require_epochs=True)
-    return stamp, _json(asdict(stamp))
+def _policy_stamp(leader, group):
+    policy = ct_policy.policy_stamp(leader.policy_path, group['leader_chat'], require_epochs=True)
+    return _json(asdict(policy)) if policy.effective == 'ON' else None
 
 
-def _worker(ctx, row, group):
-    actor = ctx.require_actor()
-    return (ctx.component == 'worker' and actor.platform == row['worker_platform']
-            and actor.chat_id == row['worker_chat']
-            and control.matches_component(ctx, group['worker_manifest']))
-
-
-def _fence(group, row, leader_binding):
-    if (row['closed_at'] is not None or row['leader_epoch'] != group['leader_epoch']
-            or row['pair_epoch'] != group['pair_epoch']
-            or row['worker_platform'] != group['worker_platform']
-            or row['worker_chat'] != group['worker_chat']):
-        return 'STALE_BINDING'
-    stamp, serialized = _stamp(leader_binding, group['leader_chat'])
-    if stamp.effective != 'ON':
+def _admission(group, worker, peer, stamp, mode):
+    if worker is None or worker['retired_at'] is not None or worker['leader_epoch'] != group['leader_epoch']:
+        return 'WRONG_WORKER'
+    if stamp is None:
         return 'POLICY_OFF'
-    if serialized != row['policy_stamp']:
-        return 'STALE_POLICY'
-    if not group['desktop_enabled']:
+    if peer is None or not peer['enabled']:
         return 'DESKTOP_OFF'
-    if row['desktop_epoch'] != group['desktop_epoch']:
-        return 'STALE_DESKTOP'
-    if row['mode'] == 'auto':
-        if not group['auto_enabled']:
-            return 'AUTO_OFF'
-        if row['auto_epoch'] != group['auto_epoch']:
-            return 'STALE_AUTO'
+    if mode == 'auto' and not peer['auto_enabled']:
+        return 'AUTO_OFF'
     return None
 
 
-def _admission(group, leader_binding, worker_binding, mode):
-    if not group['worker_chat'] or worker_binding is None:
-        return 'NOT_PAIRED', None
-    stamp, serialized = _stamp(leader_binding, group['leader_chat'])
-    if stamp.effective != 'ON':
-        return 'POLICY_OFF', serialized
-    if not group['desktop_enabled']:
-        return 'DESKTOP_OFF', serialized
-    if mode == 'auto' and not group['auto_enabled']:
-        return 'AUTO_OFF', serialized
-    return None, serialized
+def _fence(group, worker, peer, stamp, row):
+    if row['closed_at'] is not None or row['leader_epoch'] != group['leader_epoch']:
+        return 'STALE_BINDING'
+    reason = _admission(group, worker, peer, stamp, row['mode'])
+    if reason:
+        return reason
+    if stamp != row['policy_stamp']:
+        return 'STALE_POLICY'
+    if peer['desktop_epoch'] != row['desktop_epoch']:
+        return 'STALE_DESKTOP'
+    if row['mode'] == 'auto' and peer['auto_epoch'] != row['auto_epoch']:
+        return 'STALE_AUTO'
+    return None
 
 
-def _register(ctx, leader, worker):
-    # The guard already holds both installation locks. Register before granting
-    # new authority so an installer can find open rounds outside its own cwd.
-    for component in (leader,worker):
-        if component is not None:
-            control._register_worktree(component,ctx.paths.root)
+def _generation(group, peer, stamp):
+    return (group['leader_epoch'], peer['desktop_epoch'], peer['auto_epoch'], stamp)
 
 
-def _waiter_ready(db, group, stamp, now):
-    waiter = db.execute('SELECT * FROM waiter WHERE id=1').fetchone()
+def _waiter_generation(waiter):
+    return tuple(waiter[name] for name in ('leader_epoch', 'desktop_epoch', 'auto_epoch', 'policy_stamp'))
+
+
+def _waiter(db, worker_id):
+    return db.execute('SELECT * FROM waiter WHERE worker_id=?', (worker_id,)).fetchone()
+
+
+def _live(waiter, generation, now):
     return (waiter is not None and waiter['expires_at'] > now
-            and waiter['policy_stamp'] == stamp
-            and all(waiter[name] == group[name] for name in
-                    ('leader_epoch', 'pair_epoch', 'auto_epoch', 'desktop_epoch')))
+            and _waiter_generation(waiter) == generation)
+
+
+def _slot(db, worker_id):
+    return db.execute("SELECT task_id,attempt_no FROM attempts WHERE worker_id=? AND state IN "
+                      "('PUBLISHING','WAITING_FOR_USER','QUEUED','CLAIMED',"
+                      "'RUNNING','NEEDS_USER','OUTCOME_UNKNOWN')", (worker_id,)).fetchone()
+
+
+def _participant(db, row, **values):
+    db.execute('UPDATE participants SET ' + ','.join(name + '=?' for name in values)
+               + ' WHERE round_id=? AND participant_id=?',
+               (*values.values(), row['round_id'], row['participant_id']))
+
+
+def _revoke(db, row, now, reason, *, state='REVOKED'):
+    _set(db, _key(row), state=state, reason=reason, claim_hash=None, claim_expires_at=None,
+         finished_at=now)
+    scopes.release(db, _holder(row))
+    _participant(db, row, finished_at=now)
+
+
+def _pending_reason(db, row, group, worker, peer, stamp, now, *, check_waiter=False):
+    reason = _fence(group, worker, peer, stamp, row)
+    if reason:
+        return reason
+    if row['state'] == 'CLAIMED' and row['claim_expires_at'] <= now:
+        return 'CLAIM_EXPIRED'
+    if check_waiter and row['mode'] == 'auto' and row['state'] in ('PUBLISHING', 'QUEUED'):
+        waiter = _waiter(db, row['worker_id'])
+        if not _live(waiter, _generation(group, peer, stamp), now) or waiter['nonce_hash'] != row['claim_hash']:
+            return 'WAITER_LOST'
+    return None
+
+
+def _assignment(leader, worker_binding, raw):
+    contract = roles.load_contract(leader.skill_dir)
+    if worker_binding is None or roles.load_contract(worker_binding.skill_dir).contract_digest != contract.contract_digest:
+        raise BridgeError('ROLE_CONTRACT_MISMATCH')
+    return roles.validate_assignment(contract, raw, verified_model=None)
+
+
+def _stored_assignment(paths, leader, worker_binding, row):
+    assignment = _assignment(leader, worker_binding, json.loads(row['assignment']))
+    if (assignment.contract_digest != row['contract_digest']
+            or assignment.variant != row['role_variant']
+            or assignment.work_item_id != row['work_item_id']):
+        raise BridgeError('ROLE_CONTRACT_MISMATCH')
+    scope = scopes.canonical_scopes(paths, assignment)
+    baseline = json.loads(row['baseline'])
+    scopes.verify_baseline(paths, snapshot=assignment.snapshot, scope=scope, baseline=baseline)
+    return assignment, scope, baseline
+
+
+def _same_owner(db, row):
+    item = db.execute('SELECT * FROM work_items WHERE round_id=? AND work_item_id=?',
+                      (row['round_id'], row['work_item_id'])).fetchone()
+    if item is None or item['owner_participant_id'] != row['participant_id'] or item['state'] != 'active':
+        raise BridgeError('WORK_ITEM_OWNERSHIP_REQUIRED')
+    for dependency, acceptance in json.loads(item['depends_on']).items():
+        prerequisite = db.execute('SELECT state,acceptance_id FROM work_items '
+                                  'WHERE round_id=? AND work_item_id=?',
+                                  (row['round_id'], dependency)).fetchone()
+        if (prerequisite is None or prerequisite['state'] != 'accepted'
+                or prerequisite['acceptance_id'] != acceptance):
+            raise BridgeError('DEPENDENCY_NOT_ACCEPTED')
+
+
+def _scope_json(scope):
+    return _json({'read_paths': scope.read_paths, 'write_paths': scope.write_paths,
+                  'check_outputs': scope.check_outputs})
 
 
 def _request(request):
     if (not isinstance(request, Request) or not isinstance(request.publish_id, str)
             or not request.publish_id or len(request.publish_id) > 200
-            or request.kind not in ('READ', 'EDIT') or request.mode not in ('manual', 'auto')
-            or not isinstance(request.scope, (list, tuple)) or not isinstance(request.baseline, dict)):
+            or request.mode not in ('manual', 'auto') or not isinstance(request.worker_id, str)
+            or not request.worker_id or len(request.worker_id) > 200
+            or not isinstance(request.assignment, dict) or not isinstance(request.baseline, dict)):
         raise BridgeError('INVALID_REQUEST')
+    if request.task_id is not None:
+        _validate_task_id(request.task_id)
+        if request.replaces_participant_id is not None or request.transfer_evidence is not None:
+            raise BridgeError('INVALID_REQUEST')
     _bytes(request.content)
-    scope = [validate_relative_path(path) for path in request.scope]
-    if len(set(path.casefold() for path in scope)) != len(scope):
-        raise BridgeError('INVALID_SCOPE')
-    if request.kind == 'EDIT' and (not scope or set(request.baseline) != set(scope)):
-        raise BridgeError('BASELINE_REQUIRED')
-    for path in request.baseline:
-        validate_relative_path(path)
-    scope_json, baseline_json = _json(scope), _json(request.baseline)
-    if len(baseline_json.encode('utf-8')) > MAX_BYTES:
-        raise BridgeError('INVALID_BASELINE')
-    return scope_json, baseline_json
+
+
+def _dispatch_hash(round_id, request, assignment, digest):
+    return _hash(_json({
+        'round_id': round_id, 'worker_id': request.worker_id, 'mode': request.mode,
+        'task_id': request.task_id, 'assignment': roles.assignment_to_dict(assignment),
+        'contract_digest': assignment.contract_digest, 'baseline': request.baseline,
+        'request_sha256': digest, 'request_size': len(request.content),
+        'replaces_participant_id': request.replaces_participant_id,
+        'transfer_evidence': request.transfer_evidence,
+    }).encode('utf-8'))
+
+
+def _task_for_publication(db, round_id, request, assignment, encoded, now):
+    if request.task_id is None:
+        task_id = 'CT-' + uuid.uuid4().hex
+        participant_id = 'desktop-' + uuid.uuid4().hex
+        db.execute('INSERT INTO participants(round_id,participant_id,work_item_id,executor,'
+                   'worker_id,role_variant,assignment,replaces_participant_id) VALUES(?,?,?,?,?,?,?,?)',
+                   (round_id, participant_id, assignment.work_item_id, 'desktop', request.worker_id,
+                    assignment.variant, encoded, request.replaces_participant_id))
+        db.execute('INSERT INTO tasks(id,round_id,participant_id,worker_id) VALUES(?,?,?,?)',
+                   (task_id, round_id, participant_id, request.worker_id))
+        return AttemptKey(task_id, 1), participant_id
+    previous = db.execute('SELECT task_id,attempt_no FROM attempts WHERE task_id=? '
+                          'ORDER BY attempt_no DESC LIMIT 1', (request.task_id,)).fetchone()
+    row = _attempt(db, _key(previous)) if previous is not None else None
+    if (row is None or row['round_id'] != round_id or row['worker_id'] != request.worker_id
+            or row['work_item_id'] != assignment.work_item_id or row['role_variant'] != assignment.variant
+            or row['cleaned_at'] is not None):
+        raise BridgeError('STALE_TASK')
+    if row['state'] not in TERMINAL or (row['result_id'] is not None and row['ack_at'] is None):
+        raise BridgeError('REVIEW_REQUIRED')
+    _same_owner(db, row)
+    original = json.loads(row['assignment'])
+    if original['depends_on'] != roles.assignment_to_dict(assignment)['depends_on']:
+        raise BridgeError('DEPENDENCY_CONFLICT')
+    _participant(db, row, finished_at=None)
+    return AttemptKey(request.task_id, row['attempt_no'] + 1), row['participant_id']
+
+
+def _reserve_publication(ctx, expected, round_id, request, digest):
+    with control.operation_guard(ctx, worker_id=request.worker_id) as (store, db, leader, worker_binding):
+        group = control.require_leader(db, ctx, expected)
+        control.round_for_leader(db, expected, round_id)
+        worker = control.worker_by_id(db, request.worker_id)
+        if worker is None:
+            raise BridgeError('WRONG_WORKER')
+        assignment = _assignment(leader, worker_binding, request.assignment)
+        dispatch = _dispatch_hash(round_id, request, assignment, digest)
+        prior = db.execute('SELECT task_id,attempt_no FROM attempts WHERE publish_id=?',
+                           (request.publish_id,)).fetchone()
+        if prior is not None:
+            row = _attempt(db, _key(prior))
+            if row['dispatch_hash'] != dispatch:
+                raise BridgeError('PUBLICATION_CONFLICT')
+            if row['state'] != 'PUBLISHING' and row['cleaned_at'] is None and row['state'] not in {'REVOKED', 'CANCELED'}:
+                read_file(ctx.paths, _key(row), 'request', row['request_sha256'])
+            return row
+        peer = _peer(db, worker)
+        stamp = _policy_stamp(leader, group)
+        reason = _admission(group, worker, peer, stamp, request.mode)
+        if reason:
+            raise BridgeError(reason)
+        now = store.clock()
+        waiter = _waiter(db, request.worker_id)
+        if request.mode == 'auto' and not _live(waiter, _generation(group, peer, stamp), now):
+            raise BridgeError('WAITER_NOT_READY')
+        slot = _slot(db, request.worker_id)
+        if slot is not None:
+            held = _attempt(db, _key(slot))
+            if held['state'] in PENDING:
+                reason = _pending_reason(db, held, group, worker, peer, stamp, now, check_waiter=True)
+                if reason:
+                    _revoke(db, held, now, reason)
+                    slot = None
+
+        scope = scopes.canonical_scopes(ctx.paths, assignment)
+        scopes.verify_baseline(ctx.paths, snapshot=assignment.snapshot, scope=scope, baseline=request.baseline)
+        encoded = roles.canonical_assignment_json(assignment)
+        key, participant_id = _task_for_publication(db, round_id, request, assignment, encoded, now)
+        if request.task_id is None:
+            control.admit_work_item(db, ctx.paths, round_id, participant_id, assignment,
+                                    replaces_participant_id=request.replaces_participant_id,
+                                    transfer_evidence=request.transfer_evidence)
+        else:
+            control._dependencies(db, ctx.paths, round_id, assignment)
+        if slot is not None:
+            raise BridgeError('SLOT_BUSY')
+        scopes.reserve(db, scopes.ScopeHolder(round_id, participant_id, key), scope)
+        claim_hash = waiter['nonce_hash'] if request.mode == 'auto' else None
+        db.execute(
+            'INSERT INTO attempts(task_id,attempt_no,publish_id,state,mode,kind,request_sha256,request_size,'
+            'scope,baseline,desktop_epoch,auto_epoch,leader_epoch,policy_stamp,created_at,worker_id,'
+            'assignment,contract_digest,dispatch_hash,claim_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (key.task_id, key.attempt_no, request.publish_id, 'PUBLISHING', request.mode,
+             roles.assignment_kind(assignment), digest, len(request.content), _scope_json(scope),
+             _json(request.baseline), peer['desktop_epoch'], peer['auto_epoch'], group['leader_epoch'],
+             stamp, now, request.worker_id, encoded, assignment.contract_digest, dispatch, claim_hash))
+        return _attempt(db, key)
 
 
 def publish(ctx, expected, round_id, request: Request):
-    """Reserve once, publish immutable bytes, then commit visibility to the worker."""
-    scope, baseline = _request(request)
+    """Reserve the work item, worker slot and scope before publishing Markdown."""
+    _request(request)
     digest = _hash(request.content)
-    with control._guard(ctx) as (store, db, leader, worker):
+    try:
+        reserved = _reserve_publication(ctx, expected, round_id, request, digest)
+    except (BridgeError, ValueError) as exc:
+        if str(exc) == 'PUBLICATION_CONFLICT':
+            raise
+        return _view(ok=False, reason=getattr(exc, 'reason', None) or str(exc))
+    if reserved['state'] != 'PUBLISHING' or reserved['cleaned_at'] is not None:
+        return _view(reserved)
+    key = _key(reserved)
+    ref = publish_file(ctx.paths, key, 'request', request.content)
+    with control.operation_guard(ctx, worker_id=request.worker_id) as (store, db, leader, worker_binding):
         group = control.require_leader(db, ctx, expected)
-        round_row = db.execute('SELECT * FROM rounds WHERE id=?', (round_id,)).fetchone()
-        if (round_row is None or round_row['closed_at'] is not None
-                or round_row['leader_epoch'] != expected.epoch):
-            return _view(ok=False, state='REJECTED', reason='ROUND_NOT_OPEN')
-        _register(ctx,leader,worker)
-        prior = db.execute('SELECT a.*,t.round_id,t.cleaned_at FROM attempts a JOIN tasks t ON t.id=a.task_id '
-                           'WHERE publish_id=?', (request.publish_id,)).fetchone()
-        if prior is not None:
-            if prior['cleaned_at'] is not None:
-                return _view(prior)
-            if (prior['request_sha256'] != digest or prior['request_size'] != len(request.content)
-                    or prior['round_id'] != round_id or prior['scope'] != scope
-                    or prior['baseline'] != baseline or prior['kind'] != request.kind
-                    or (request.task_id is not None and request.task_id != prior['task_id'])):
-                raise BridgeError('PUBLICATION_CONFLICT')
-            key = AttemptKey(prior['task_id'], prior['attempt_no'])
-            if prior['state'] != 'PUBLISHING':
-                read_file(ctx.paths, key, 'request', digest)
-                return _view(prior)
-        else:
-            reason, stamp = _admission(group, leader, worker, request.mode)
-            if reason:
-                return _view(ok=False, state='REJECTED', reason=reason)
-            if request.mode == 'auto' and not _waiter_ready(db, group, stamp, store.clock()):
-                return _view(ok=False, state='REJECTED', reason='WAITER_NOT_READY')
-            if request.task_id is None:
-                task_id, attempt_no = 'CT-' + uuid.uuid4().hex, 1
-                db.execute('INSERT INTO tasks(id,round_id,pair_epoch,worker_platform,worker_chat) '
-                           'VALUES(?,?,?,?,?)', (task_id,round_id,group['pair_epoch'],
-                                               group['worker_platform'],group['worker_chat']))
-            else:
-                validate_relative_path(request.task_id)
-                task_id = request.task_id
-                task = db.execute('SELECT * FROM tasks WHERE id=?',(task_id,)).fetchone()
-                if (task is None or task['round_id'] != round_id
-                        or task['pair_epoch'] != group['pair_epoch']
-                        or task['worker_chat'] != group['worker_chat'] or task['cleaned_at'] is not None):
-                    return _view(ok=False,state='REJECTED',reason='STALE_TASK')
-                previous = db.execute('SELECT * FROM attempts WHERE task_id=? '
-                                      'ORDER BY attempt_no DESC LIMIT 1',(task_id,)).fetchone()
-                if previous and (previous['state'] not in TERMINAL
-                                 or (previous['started_at'] is not None and previous['ack_at'] is None)):
-                    return _view(previous,ok=False,reason='REVIEW_REQUIRED')
-                attempt_no = previous['attempt_no'] + 1 if previous else 1
-            key = AttemptKey(task_id,attempt_no)
-            db.execute('INSERT INTO attempts(task_id,attempt_no,publish_id,state,mode,kind,'
-                       'request_sha256,request_size,scope,baseline,desktop_epoch,auto_epoch,'
-                       'pair_epoch,leader_epoch,policy_stamp,created_at) '
-                       'VALUES(?,?,?,\'PUBLISHING\',?,?,?,?,?,?,?,?,?,?,?,?)',
-                       (key.task_id,key.attempt_no,request.publish_id,request.mode,request.kind,
-                        digest,len(request.content),scope,baseline,group['desktop_epoch'],
-                        group['auto_epoch'],group['pair_epoch'],group['leader_epoch'],stamp,store.clock()))
-            if request.mode == 'auto':
-                waiter = db.execute('SELECT nonce FROM waiter WHERE id=1').fetchone()
-                _set(db,key,claim_hash=_token_hash(waiter['nonce']))
-    # Reservation survives a crash here. A retry must use the same publication and bytes.
-    ref = publish_file(ctx.paths,key,'request',request.content)
-    with control._guard(ctx) as (store,db,leader,worker):
-        group = control.require_leader(db,ctx,expected)
-        row = _attempt(db,key)
-        if row['cleaned_at'] is not None:
-            return _view(row)
-        if row['state'] != 'PUBLISHING':
-            return _view(row)
-        reason = _fence(group,row,leader)
-        if reason:
-            _set(db,key,state='REVOKED',reason=reason,claim_hash=None,claim_expires_at=None)
-            return _view(_attempt(db,key),ok=False,reason=reason)
-        read_file(ctx.paths,key,'request',row['request_sha256'])
-        _set(db,key,state='QUEUED' if row['mode']=='auto' else 'WAITING_FOR_USER',reason=None)
-        return _view(_attempt(db,key),request_path=str(ctx.paths.data / ref.relative_path))
-
-
-_WAITER_EPOCHS = ('leader_epoch', 'pair_epoch', 'auto_epoch', 'desktop_epoch')
-_HEARTBEAT_SECONDS = 4
-_IDLE_INTERVAL = .25
-
-
-def _scope(group, stamp):
-    return tuple(group[name] for name in _WAITER_EPOCHS) + (stamp,)
-
-
-def _next_delivery(db, now):
-    busy = db.execute(
-        "SELECT 1 FROM attempts WHERE state IN ('RUNNING','NEEDS_USER','OUTCOME_UNKNOWN') "
-        "OR (state='CLAIMED' AND claim_expires_at>?) LIMIT 1", (now,)
-    ).fetchone()
-    return not busy and db.execute("SELECT 1 FROM attempts WHERE state='QUEUED' LIMIT 1").fetchone()
-
-
-def _claim_next(ctx, db, leader, group, nonce, now):
-    if not _next_delivery(db, now):
-        return None
-    db.execute("UPDATE attempts SET state='REVOKED',reason='CLAIM_EXPIRED',claim_hash=NULL,"
-               "claim_expires_at=NULL WHERE state='CLAIMED' AND claim_expires_at<=?", (now,))
-    rows = db.execute("SELECT task_id,attempt_no FROM attempts WHERE state='QUEUED' "
-                      "ORDER BY created_at,task_id,attempt_no").fetchall()
-    for candidate in rows:
-        key = AttemptKey(candidate['task_id'], candidate['attempt_no'])
         row = _attempt(db, key)
-        reason = _fence(group, row, leader)
-        if reason is None and not _matches(nonce, row['claim_hash']):
-            reason = 'WAITER_LOST'
+        if row['state'] != 'PUBLISHING' or row['cleaned_at'] is not None:
+            return _view(row)
+        if row['dispatch_hash'] != reserved['dispatch_hash'] or row['request_sha256'] != ref.sha256:
+            raise BridgeError('PUBLICATION_CONFLICT')
+        worker = control.worker_by_id(db, request.worker_id)
+        peer = _peer(db, worker) if worker is not None else None
+        stamp = _policy_stamp(leader, group)
+        reason = _pending_reason(db, row, group, worker, peer, stamp, store.clock(), check_waiter=True)
         if reason:
-            _set(db, key, state='REVOKED', reason=reason, claim_hash=None, claim_expires_at=None)
-            continue
+            _revoke(db, row, store.clock(), reason)
+            return _view(_attempt(db, key), ok=False)
+        try:
+            _same_owner(db, row)
+            assignment = _assignment(leader, worker_binding, json.loads(row['assignment']))
+            if assignment.contract_digest != row['contract_digest']:
+                raise BridgeError('ROLE_CONTRACT_MISMATCH')
+            control._dependencies(db, ctx.paths, round_id, assignment)
+        except (BridgeError, ValueError) as exc:
+            _revoke(db, row, store.clock(), getattr(exc, 'reason', None) or str(exc))
+            return _view(_attempt(db, key), ok=False)
         read_file(ctx.paths, key, 'request', row['request_sha256'])
-        claim = secrets.token_urlsafe(32)
-        _set(db, key, state='CLAIMED', claim_hash=_token_hash(claim), claim_expires_at=now + CLAIM_SECONDS)
-        # This is a healthy handoff, so the next waiter uses the same nonce.
-        db.execute('UPDATE waiter SET expires_at=0 WHERE id=1 AND nonce=?', (nonce,))
-        return _view(_attempt(db, key), claim=claim)
-    return None
+        _set(db, key, state='QUEUED' if row['mode'] == 'auto' else 'WAITING_FOR_USER', reason=None)
+        return _view(_attempt(db, key), request_path=str(ctx.paths.data / ref.relative_path))
+
+
+def _worker_actor(db, ctx):
+    if ctx.component != 'worker':
+        return None
+    return control.worker_for_actor(db, ctx)
+
+
+def _wake(ctx, db, worker, worker_binding, leader, row, now):
+    _same_owner(db, row)
+    assignment = _assignment(leader, worker_binding, json.loads(row['assignment']))
+    if assignment.contract_digest != row['contract_digest']:
+        raise BridgeError('ROLE_CONTRACT_MISMATCH')
+    key = _key(row)
+    read_file(ctx.paths, key, 'request', row['request_sha256'])
+    claim = secrets.token_urlsafe(32)
+    _set(db, key, state='CLAIMED', claim_hash=_token_hash(claim), claim_expires_at=now + CLAIM_SECONDS)
+    db.execute('DELETE FROM waiter WHERE worker_id=?', (worker['worker_id'],))
+    return _view(_attempt(db, key), claim=claim)
 
 
 def listen(ctx):
-    """Wait in the paired chat's tool, polling only read-only SQLite while idle."""
-    nonce = secrets.token_urlsafe(32)
-    initial = None
-    delivered = False
+    """Register one heartbeat per worker and poll read-only until it can claim."""
+    nonce_hash = _token_hash(secrets.token_urlsafe(32))
+    worker_id = None
+    generation = None
     store = Store(ctx.paths)
     try:
         while True:
-            with control._guard(ctx) as (writer, db, leader, worker):
-                group = _group(db)
-                if not _worker(ctx, group, group):
+            with control.operation_guard(ctx) as (writer, db, leader, worker_binding):
+                worker = _worker_actor(db, ctx)
+                if worker is None:
                     return _view(ok=False, state='STOPPED', reason='WRONG_WORKER')
-                reason, stamp = _admission(group, leader, worker, 'auto')
+                group = _group(db)
+                peer = _peer(db, worker)
+                stamp = _policy_stamp(leader, group)
+                reason = _admission(group, worker, peer, stamp, 'auto')
                 if reason:
                     return _view(ok=False, state='STOPPED', reason=reason)
-                signature = _scope(group, stamp)
+                observed_worker_id = worker['worker_id']
+                current = _waiter(db, observed_worker_id)
                 now = writer.clock()
-                current = db.execute('SELECT * FROM waiter WHERE id=1').fetchone()
-                if initial is None:
-                    if current is not None and current['expires_at'] > now:
+                signature = _generation(group, peer, stamp)
+                if generation is None:
+                    if _live(current, signature, now):
                         return _view(ok=False, state='STOPPED', reason='WAITER_BUSY')
-                    if (current is not None and current['expires_at'] == 0
-                            and _scope(current, current['policy_stamp']) == signature):
-                        nonce = current['nonce']
-                    _register(ctx, leader, worker)
-                elif (signature != initial or current is None or current['nonce'] != nonce
-                      or current['expires_at'] <= now):
+                elif (worker_id != observed_worker_id or signature != generation
+                      or not _live(current, signature, now) or current['nonce_hash'] != nonce_hash):
                     return _view(ok=False, state='STOPPED', reason='WAITER_INVALIDATED')
-                db.execute('INSERT INTO waiter(id,nonce,leader_epoch,pair_epoch,auto_epoch,'
-                           'desktop_epoch,policy_stamp,expires_at) VALUES(1,?,?,?,?,?,?,?) '
-                           'ON CONFLICT(id) DO UPDATE SET nonce=excluded.nonce,'
-                           'leader_epoch=excluded.leader_epoch,pair_epoch=excluded.pair_epoch,'
-                           'auto_epoch=excluded.auto_epoch,desktop_epoch=excluded.desktop_epoch,'
-                           'policy_stamp=excluded.policy_stamp,expires_at=excluded.expires_at',
-                           (nonce, *signature, now + WAITER_SECONDS))
-                initial = signature
-                event = _claim_next(ctx, db, leader, group, nonce, now)
-            if event is not None:
-                delivered = True
-                return event
+
+                slot = _slot(db, observed_worker_id)
+                row = _attempt(db, _key(slot)) if slot is not None else None
+                if row is not None and row['state'] in PENDING:
+                    reason = _pending_reason(db, row, group, worker, peer, stamp, now, check_waiter=True)
+                    if reason:
+                        _revoke(db, row, now, reason)
+                        row = None
+                if row is not None and row['state'] in ACTIVE | {'CLAIMED', 'WAITING_FOR_USER'}:
+                    return _view(ok=False, state='STOPPED', reason='SLOT_BUSY')
+                if row is not None and row['state'] == 'QUEUED':
+                    return _wake(ctx, db, worker, worker_binding, leader, row, now)
+
+                db.execute('INSERT INTO waiter(worker_id,nonce_hash,leader_epoch,desktop_epoch,auto_epoch,'
+                           'policy_stamp,expires_at) VALUES(?,?,?,?,?,?,?) '
+                           'ON CONFLICT(worker_id) DO UPDATE SET nonce_hash=excluded.nonce_hash,'
+                           'leader_epoch=excluded.leader_epoch,desktop_epoch=excluded.desktop_epoch,'
+                           'auto_epoch=excluded.auto_epoch,policy_stamp=excluded.policy_stamp,'
+                           'expires_at=excluded.expires_at',
+                           (observed_worker_id, nonce_hash, *signature, now + WAITER_SECONDS))
+                worker_id, generation = observed_worker_id, signature
 
             heartbeat = time.monotonic() + _HEARTBEAT_SECONDS
             while time.monotonic() < heartbeat:
                 with store.poll_read() as db:
-                    current = db.execute('SELECT * FROM waiter WHERE id=1').fetchone() if db is not None else None
-                    group = _group(db) if db is not None else None
-                    now = store.clock()
-                    if (current is None or group is None or current['nonce'] != nonce
-                            or current['expires_at'] <= now or _scope(group, stamp) != initial):
+                    if db is None:
                         return _view(ok=False, state='STOPPED', reason='WAITER_INVALIDATED')
-                    if _next_delivery(db, now):
+                    current = _waiter(db, worker_id)
+                    current_group = _group(db)
+                    current_peer = db.execute('SELECT * FROM peers WHERE platform=?',
+                                              (worker['platform'],)).fetchone()
+                    if (not _live(current, generation, store.clock()) or current['nonce_hash'] != nonce_hash
+                            or current_peer is None or not current_peer['enabled']
+                            or not current_peer['auto_enabled']
+                            or _generation(current_group, current_peer, stamp) != generation):
+                        return _view(ok=False, state='STOPPED', reason='WAITER_INVALIDATED')
+                    queued = db.execute("SELECT 1 FROM attempts WHERE worker_id=? AND state='QUEUED'",
+                                        (worker_id,)).fetchone()
+                    if queued:
                         break
                 time.sleep(_IDLE_INTERVAL)
     finally:
-        # A successful claim leaves a consumed row for its successor, even if
-        # the next helper registers before this process has returned to the app.
-        if initial is not None and not delivered:
+        if worker_id is not None:
             try:
                 with store.poll_read() as db:
-                    owned = db is not None and db.execute('SELECT 1 FROM waiter WHERE nonce=? '
-                                                          'AND expires_at>0', (nonce,)).fetchone()
+                    waiter = _waiter(db, worker_id) if db is not None else None
+                    owned = waiter is not None and waiter['nonce_hash'] == nonce_hash
                 if owned:
                     with store.write() as db:
-                        db.execute('DELETE FROM waiter WHERE nonce=? AND expires_at>0', (nonce,))
+                        db.execute('DELETE FROM waiter WHERE worker_id=? AND nonce_hash=?',
+                                   (worker_id, nonce_hash))
             except (OSError, ValueError):
-                # A failed cleanup expires via the persisted deadline.
                 pass
 
 
+def _request_view(ctx, row, **extra):
+    key = _key(row)
+    payload = read_file(ctx.paths, key, 'request', row['request_sha256'])
+    if len(payload) != row['request_size']:
+        raise BridgeError('PUBLICATION_CONFLICT')
+    return _view(row, request=payload.decode('utf-8'), scope=json.loads(row['scope']),
+                 baseline=json.loads(row['baseline']), **extra)
+
+
 def begin(ctx, key: AttemptKey, claim: str | None):
-    with control._guard(ctx) as (store,db,leader,worker):
-        row = _attempt(db,key)
-        if row is not None and row['cleaned_at'] is not None:
-            return _view(row)
-        if row is None or not _worker(ctx, row, _group(db)):
-            return _view(row,ok=False,reason='WRONG_WORKER')
-        if row['state'] not in ('WAITING_FOR_USER','CLAIMED'):
-            return _view(row,ok=False,reason='NOT_STARTABLE')
-        reason = _fence(_group(db),row,leader)
+    _validate_key(key)
+    with control.operation_guard(ctx) as (store, db, leader, worker_binding):
+        worker = _worker_actor(db, ctx)
+        row = _attempt(db, key)
+        if row is None or worker is None or row['worker_id'] != worker['worker_id']:
+            return _view(ok=False, reason='WRONG_WORKER')
+        if row['cleaned_at'] is not None or row['state'] not in ('WAITING_FOR_USER', 'CLAIMED'):
+            return _view(row, ok=False, reason='NOT_STARTABLE')
+        if row['mode'] == 'auto' and not _matches(claim, row['claim_hash']):
+            return _view(ok=False, reason='INVALID_CLAIM')
+        if row['mode'] == 'manual' and claim is not None:
+            return _view(ok=False, reason='UNEXPECTED_CLAIM')
+        group = _group(db)
+        peer = _peer(db, worker)
+        reason = _pending_reason(db, row, group, worker, peer, _policy_stamp(leader, group), store.clock())
         if reason:
-            _set(db,key,state='REVOKED',reason=reason,claim_hash=None,claim_expires_at=None)
-            return _view(_attempt(db,key),ok=False,reason=reason)
-        if row['mode'] == 'auto':
-            if not _matches(claim,row['claim_hash']):
-                return _view(row,ok=False,reason='INVALID_CLAIM')
-            if row['claim_expires_at'] is None or row['claim_expires_at'] <= store.clock():
-                _set(db,key,state='REVOKED',reason='CLAIM_EXPIRED',claim_hash=None,claim_expires_at=None)
-                return _view(_attempt(db,key),ok=False,reason='CLAIM_EXPIRED')
-        elif claim is not None:
-            return _view(row,ok=False,reason='UNEXPECTED_CLAIM')
-        if db.execute("SELECT 1 FROM attempts WHERE state IN "
-                      "('RUNNING','NEEDS_USER','OUTCOME_UNKNOWN')").fetchone():
-            return _view(row,ok=False,reason='SLOT_BUSY')
-        _register(ctx,leader,worker)
-        payload = read_file(ctx.paths,key,'request',row['request_sha256'])
+            _revoke(db, row, store.clock(), reason)
+            return _view(_attempt(db, key), ok=False)
+        try:
+            slot = _slot(db, worker['worker_id'])
+            if slot is None or _key(slot) != key:
+                raise BridgeError('SLOT_BUSY')
+            _same_owner(db, row)
+            assignment, scope, _ = _stored_assignment(ctx.paths, leader, worker_binding, row)
+            control._dependencies(db, ctx.paths, row['round_id'], assignment)
+            if _scope_json(scope) != row['scope']:
+                raise BridgeError('SCOPE_CHANGED')
+        except (BridgeError, ValueError) as exc:
+            _revoke(db, row, store.clock(), getattr(exc, 'reason', None) or str(exc))
+            return _view(_attempt(db, key), ok=False)
         ticket = secrets.token_urlsafe(32)
-        _set(db,key,state='RUNNING',started_at=store.clock(),execution_hash=_token_hash(ticket),
-             claim_hash=None,claim_expires_at=None,reason=None)
-        return _view(_attempt(db,key),execution_ticket=ticket,request=payload.decode('utf-8'),
-                     scope=json.loads(row['scope']),baseline=json.loads(row['baseline']),kind=row['kind'])
+        now = store.clock()
+        _set(db, key, state='RUNNING', started_at=now, execution_hash=_token_hash(ticket),
+             claim_hash=None, claim_expires_at=None, reason=None)
+        if row['mode'] == 'manual':
+            db.execute('DELETE FROM waiter WHERE worker_id=?', (worker['worker_id'],))
+        db.execute('UPDATE participants SET started_at=COALESCE(started_at,?) '
+                   'WHERE round_id=? AND participant_id=?', (now, row['round_id'], row['participant_id']))
+        return _request_view(ctx, _attempt(db, key), execution_ticket=ticket,
+                             assignment=roles.assignment_to_dict(assignment))
+
+
+def _leader_attempt(db, ctx, expected, key):
+    group = control.require_leader(db, ctx, expected)
+    return group, _attempt(db, key)
+
+
+def _selected_worker(ctx, key):
+    # This preliminary read selects the component lock only. Authority and the
+    # exact attempt are checked again under the installation and policy locks.
+    with Store(ctx.paths).read() as db:
+        row = _attempt(db, key) if db is not None else None
+        return row['worker_id'] if row is not None else None
 
 
 def reoffer(ctx, expected, key: AttemptKey, mode):
-    if mode not in ('manual','auto'):
+    if mode not in ('manual', 'auto'):
         raise BridgeError('INVALID_MODE')
-    with control._guard(ctx) as (store,db,leader,worker):
-        group = control.require_leader(db,ctx,expected)
-        row = _attempt(db,key)
-        if row is not None and row['cleaned_at'] is not None:
-            return _view(row)
-        if row is None or row['state'] not in PENDING or row['started_at'] is not None:
-            return _view(row,ok=False,reason='NOT_PENDING')
-        if row['closed_at'] is not None or row['pair_epoch'] != group['pair_epoch']:
-            return _view(row,ok=False,reason='STALE_BINDING')
-        if row['mode'] == 'manual' and mode == 'auto':
-            return _view(row,ok=False,reason='MANUAL_DRAFT')
-        reason,stamp = _admission(group,leader,worker,mode)
-        if reason:
-            return _view(row,ok=False,reason=reason)
-        if mode == 'auto' and not _waiter_ready(db,group,stamp,store.clock()):
-            return _view(row,ok=False,reason='WAITER_NOT_READY')
-        read_file(ctx.paths,key,'request',row['request_sha256'])
-        _set(db,key,mode=mode,state='QUEUED' if mode=='auto' else 'WAITING_FOR_USER',
-             desktop_epoch=group['desktop_epoch'],auto_epoch=group['auto_epoch'],
-             leader_epoch=group['leader_epoch'],policy_stamp=stamp,reason=None,
-             claim_hash=None,claim_expires_at=None)
-        if mode == 'auto':
-            waiter = db.execute('SELECT nonce FROM waiter WHERE id=1').fetchone()
-            _set(db,key,claim_hash=_token_hash(waiter['nonce']))
-        return _view(_attempt(db,key))
+    _validate_key(key)
+    worker_id = _selected_worker(ctx, key)
+    try:
+        with control.operation_guard(ctx, worker_id=worker_id) as (store, db, leader, worker_binding):
+            group, row = _leader_attempt(db, ctx, expected, key)
+            if row is None or row['started_at'] is not None or row['state'] not in PENDING | {'REVOKED'}:
+                return _view(row, ok=False, reason='NOT_PENDING')
+            if row['cleaned_at'] is not None or row['closed_at'] is not None or row['leader_epoch'] != group['leader_epoch']:
+                return _view(row, ok=False, reason='STALE_BINDING')
+            if row['mode'] == 'manual' and mode == 'auto':
+                return _view(row, ok=False, reason='MANUAL_DRAFT')
+            worker = control.worker_by_id(db, worker_id)
+            peer = _peer(db, worker) if worker is not None else None
+            stamp = _policy_stamp(leader, group)
+            reason = _admission(group, worker, peer, stamp, mode)
+            if reason:
+                return _view(row, ok=False, reason=reason)
+            now = store.clock()
+            waiter = _waiter(db, worker_id)
+            if mode == 'auto' and not _live(waiter, _generation(group, peer, stamp), now):
+                return _view(row, ok=False, reason='WAITER_NOT_READY')
+            slot = _slot(db, worker_id)
+            if slot is not None and _key(slot) != key:
+                return _view(row, ok=False, reason='SLOT_BUSY')
+            _same_owner(db, row)
+            _, scope, _ = _stored_assignment(ctx.paths, leader, worker_binding, row)
+            read_file(ctx.paths, key, 'request', row['request_sha256'])
+            if row['state'] == 'REVOKED':
+                scopes.reserve(db, _holder(row), scope)
+            _set(db, key, mode=mode, state='QUEUED' if mode == 'auto' else 'WAITING_FOR_USER',
+                 desktop_epoch=peer['desktop_epoch'], auto_epoch=peer['auto_epoch'],
+                 policy_stamp=stamp, finished_at=None, reason=None, claim_expires_at=None,
+                 claim_hash=waiter['nonce_hash'] if mode == 'auto' else None)
+            _participant(db, row, finished_at=None)
+            return _view(_attempt(db, key))
+    except (BridgeError, ValueError) as exc:
+        return _view(ok=False, reason=getattr(exc, 'reason', None) or str(exc))
+
+
+def _execution_owner(ctx, db, row, execution_ticket):
+    if row is None or row['worker_id'] is None or ctx.component != 'worker':
+        return False
+    worker = control.worker_by_id(db, row['worker_id'])
+    actor = ctx.require_actor()
+    return (worker is not None and worker['platform'] == actor.platform and worker['chat_id'] == actor.chat_id
+            and worker['leader_epoch'] == row['leader_epoch']
+            and control.matches_component(ctx, worker['manifest'])
+            and _matches(execution_ticket, row['execution_hash']))
+
+
+def _result_path(paths, key):
+    return paths.data / key.task_id / f'attempt-{key.attempt_no}' / 'result.md'
+
+
+def _read_result(paths, row):
+    payload = read_file(paths, _key(row), 'result', row['result_sha256'])
+    if len(payload) != row['result_size']:
+        raise BridgeError('RESULT_CONFLICT')
+    return payload
+
+
+def _finish_row(db, row, now, state, digest, size, *, reason=None, evidence=None):
+    _set(db, _key(row), state=state, result_id='result-' + uuid.uuid4().hex,
+         result_sha256=digest, result_size=size, finished_at=now, reason=reason, evidence=evidence)
+    _participant(db, row, finished_at=now)
+    scopes.release(db, _holder(row), access='read')
 
 
 def finish(ctx, key: AttemptKey, execution_ticket, state, result: bytes):
-    if state not in TERMINAL | {'NEEDS_USER','OUTCOME_UNKNOWN'}:
+    _validate_key(key)
+    if not isinstance(state, str) or state not in TERMINAL | {'NEEDS_USER', 'OUTCOME_UNKNOWN'}:
         raise BridgeError('INVALID_FINISH_STATE')
     _bytes(result)
-    with control._guard(ctx,terminal=True) as (store,db,leader,worker):
-        row = _attempt(db,key)
-        if row is not None and row['cleaned_at'] is not None:
+    with control.operation_guard(ctx, terminal=True) as (store, db, _, _):
+        row = _attempt(db, key)
+        if not _execution_owner(ctx, db, row, execution_ticket):
+            return _view(ok=False, reason='INVALID_EXECUTION')
+        if row['cleaned_at'] is not None:
             return _view(row)
-        if row is None or not _worker(ctx, row, _group(db)) or not _matches(execution_ticket,row['execution_hash']):
-            return _view(row,ok=False,reason='INVALID_EXECUTION')
         if row['state'] in TERMINAL:
             if row['state'] != state or row['result_sha256'] != _hash(result):
                 raise BridgeError('RESULT_CONFLICT')
-            read_file(ctx.paths,key,'result',row['result_sha256'])
+            _read_result(ctx.paths, row)
             return _view(row)
-        if row['state'] not in ACTIVE:
-            return _view(row,ok=False,reason='NOT_RUNNING')
+        if row['state'] not in ACTIVE or row['closed_at'] is not None:
+            return _view(row, ok=False, reason='NOT_RUNNING')
         if state not in TERMINAL:
-            _set(db,key,state=state,reason=result.decode('utf-8'))
-            return _view(_attempt(db,key))
-        ref = publish_file(ctx.paths,key,'result',result)
-        _set(db,key,state=state,result_id='result-'+uuid.uuid4().hex,
-             result_sha256=ref.sha256,result_size=ref.size,finished_at=store.clock(),reason=None)
-        return _view(_attempt(db,key),result_path=str(ctx.paths.data/ref.relative_path))
+            reason = result.decode('utf-8')
+            if check_plain_file(_result_path(ctx.paths, key), ctx.paths.data):
+                return _view(row, ok=False, reason='RESULT_RECONCILIATION_REQUIRED')
+            if row['state'] == state and row['reason'] != reason:
+                raise BridgeError('RESULT_CONFLICT')
+            _set(db, key, state=state, reason=reason)
+            return _view(_attempt(db, key))
+        ref = publish_file(ctx.paths, key, 'result', result)
+        _finish_row(db, row, store.clock(), state, ref.sha256, ref.size)
+        return _view(_attempt(db, key), result_path=str(ctx.paths.data / ref.relative_path))
 
 
 def resume(ctx, key: AttemptKey, execution_ticket):
-    with control._guard(ctx,terminal=True) as (store,db,leader,worker):
-        row = _attempt(db,key)
-        if row is not None and row['cleaned_at'] is not None:
+    _validate_key(key)
+    with control.operation_guard(ctx, terminal=True) as (_, db, _, _):
+        row = _attempt(db, key)
+        if not _execution_owner(ctx, db, row, execution_ticket):
+            return _view(ok=False, reason='INVALID_EXECUTION')
+        if row['cleaned_at'] is not None:
             return _view(row)
-        if row is None or not _worker(ctx, row, _group(db)) or not _matches(execution_ticket,row['execution_hash']):
-            return _view(row,ok=False,reason='INVALID_EXECUTION')
-        if row['state'] not in ('NEEDS_USER','OUTCOME_UNKNOWN'):
-            return _view(row,ok=False,reason='NOT_RESUMABLE')
-        # A final file without a committed receipt must be recovered by finish, not replayed work.
-        result_path = ctx.paths.data/key.task_id/('attempt-'+str(key.attempt_no))/'result.md'
-        if result_path.exists():
-            return _view(row,ok=False,reason='RESULT_RECONCILIATION_REQUIRED')
-        payload = read_file(ctx.paths,key,'request',row['request_sha256'])
-        _set(db,key,state='RUNNING',reason=None)
-        return _view(_attempt(db,key),request=payload.decode('utf-8'),
-                     scope=json.loads(row['scope']),baseline=json.loads(row['baseline']),kind=row['kind'])
+        if row['closed_at'] is not None or row['state'] not in ('NEEDS_USER', 'OUTCOME_UNKNOWN'):
+            return _view(row, ok=False, reason='NOT_RESUMABLE')
+        if check_plain_file(_result_path(ctx.paths, key), ctx.paths.data):
+            return _view(row, ok=False, reason='RESULT_RECONCILIATION_REQUIRED')
+        _set(db, key, state='RUNNING', reason=None)
+        return _request_view(ctx, _attempt(db, key))
 
 
 def cancel_pending(ctx, expected, key: AttemptKey):
-    with control._guard(ctx,terminal=True) as (store,db,leader,worker):
-        control.require_leader(db,ctx,expected)
-        row = _attempt(db,key)
+    _validate_key(key)
+    with control.operation_guard(ctx, terminal=True) as (store, db, _, _):
+        _, row = _leader_attempt(db, ctx, expected, key)
         if row is not None and row['cleaned_at'] is not None:
             return _view(row)
-        if row is None or row['started_at'] is not None or row['state'] not in PENDING | {'CANCELED'}:
-            return _view(row,ok=False,reason='STARTED_REQUIRES_RECONCILIATION')
-        if row['state'] == 'CANCELED':
-            return _view(row)
-        _set(db,key,state='CANCELED',finished_at=store.clock(),claim_hash=None,
-             claim_expires_at=None,reason='CANCELED_BEFORE_BEGIN')
-        return _view(_attempt(db,key))
+        if (row is None or row['started_at'] is not None
+                or row['state'] not in PENDING | {'CANCELED', 'REVOKED'} or row['closed_at'] is not None):
+            return _view(row, ok=False, reason='STARTED_REQUIRES_RECONCILIATION')
+        if row['state'] != 'CANCELED':
+            _revoke(db, row, store.clock(), 'CANCELED_BEFORE_BEGIN', state='CANCELED')
+        return _view(_attempt(db, key))
+
+
+def _scope_evidence(key, row, evidence):
+    return (isinstance(evidence, dict) and evidence.get('task_id') == key.task_id
+            and type(evidence.get('attempt_no')) is int and evidence['attempt_no'] == key.attempt_no
+            and isinstance(evidence.get('summary'), str) and bool(evidence['summary'].strip())
+            and evidence.get('scope_verified') is True and row['assignment'] is not None
+            and evidence.get('snapshot') == json.loads(row['assignment'])['snapshot'])
 
 
 def reconcile(ctx, expected, key: AttemptKey, evidence):
-    valid = (isinstance(evidence,dict) and evidence.get('task_id')==key.task_id
-             and evidence.get('attempt_no')==key.attempt_no
-             and evidence.get('confirmed_by') in ('worker','user')
-             and evidence.get('stopped') is True and isinstance(evidence.get('summary'),str)
-             and bool(evidence['summary'].strip()))
-    if not valid:
-        return _view(ok=False,state='REJECTED',reason='SCOPED_CONFIRMATION_REQUIRED')
-    encoded = _json(evidence)
-    _bytes(encoded.encode('utf-8'))
-    with control._guard(ctx,terminal=True) as (store,db,leader,worker):
-        group = control.require_leader(db,ctx,expected)
-        row = _attempt(db,key)
+    _validate_key(key)
+    with control.operation_guard(ctx, terminal=True) as (store, db, _, _):
+        group, row = _leader_attempt(db, ctx, expected, key)
         if row is not None and row['cleaned_at'] is not None:
             return _view(row)
         if row is None or row['leader_epoch'] != group['leader_epoch'] or row['closed_at'] is not None:
-            return _view(row,ok=False,reason='STALE_ATTEMPT')
+            return _view(row, ok=False, reason='STALE_ATTEMPT')
+        if (not _scope_evidence(key, row, evidence) or evidence.get('confirmed_by') not in ('worker', 'user')
+                or evidence.get('stopped') is not True):
+            return _view(row, ok=False, reason='SCOPED_CONFIRMATION_REQUIRED')
+        encoded = _json(evidence)
         if row['state'] in TERMINAL:
             if row['evidence'] == encoded and row['result_id']:
-                read_file(ctx.paths,key,'result',row['result_sha256'])
+                _read_result(ctx.paths, row)
                 return _view(row)
-            return _view(row,ok=False,reason='ALREADY_FINISHED')
+            return _view(row, ok=False, reason='ALREADY_FINISHED')
         if row['state'] not in ACTIVE:
-            return _view(row,ok=False,reason='NOT_RUNNING')
-        result_path = ctx.paths.data/key.task_id/('attempt-'+str(key.attempt_no))/'result.md'
-        if result_path.exists():
-            state = evidence.get('state')
-            digest = evidence.get('result_sha256')
-            if state not in TERMINAL or not isinstance(digest,str):
-                return _view(row,ok=False,reason='RESULT_RECONCILIATION_REQUIRED')
-            payload = read_file(ctx.paths,key,'result',digest)
-            result_digest,result_size = digest,len(payload)
+            return _view(row, ok=False, reason='NOT_RUNNING')
+        if check_plain_file(_result_path(ctx.paths, key), ctx.paths.data):
+            state, digest = evidence.get('state'), evidence.get('result_sha256')
+            if not isinstance(state, str) or state not in TERMINAL or not isinstance(digest, str):
+                return _view(row, ok=False, reason='RESULT_RECONCILIATION_REQUIRED')
+            size = len(read_file(ctx.paths, key, 'result', digest))
         else:
+            if evidence.get('state', 'CANCELED') != 'CANCELED' or 'result_sha256' in evidence:
+                return _view(row, ok=False, reason='RESULT_RECONCILIATION_REQUIRED')
             state = 'CANCELED'
-            ref = publish_file(ctx.paths,key,'result',encoded.encode('utf-8'))
-            result_digest,result_size = ref.sha256,ref.size
-        _set(db,key,state=state,finished_at=store.clock(),evidence=encoded,
-             result_id='result-'+uuid.uuid4().hex,result_sha256=result_digest,result_size=result_size,
-             reason='CONFIRMED_STOPPED',execution_hash=None,claim_hash=None,claim_expires_at=None)
-        return _view(_attempt(db,key))
+            ref = publish_file(ctx.paths, key, 'result', encoded.encode('utf-8'))
+            digest, size = ref.sha256, ref.size
+        _finish_row(db, row, store.clock(), state, digest, size, reason='CONFIRMED_STOPPED', evidence=encoded)
+        scopes.release(db, _holder(row), access='write')
+        return _view(_attempt(db, key))
 
 
 def grant_read(ctx, expected, key: AttemptKey):
-    with control._guard(ctx,terminal=True) as (store,db,leader,worker):
-        control.require_leader(db,ctx,expected)
-        row = _attempt(db,key)
-        if row is not None and row['cleaned_at'] is not None:
-            return _view(row)
+    _validate_key(key)
+    with control.operation_guard(ctx, terminal=True) as (store, db, _, _):
+        _, row = _leader_attempt(db, ctx, expected, key)
         if row is None:
-            return _view(ok=False,reason='ATTEMPT_NOT_FOUND')
+            return _view(ok=False, reason='ATTEMPT_NOT_FOUND')
+        if row['cleaned_at'] is not None:
+            return _view(row)
         token = secrets.token_urlsafe(32)
+        expires_at = store.clock() + GRANT_SECONDS
         db.execute('INSERT INTO read_grants(task_id,attempt_no,token_hash,expires_at) VALUES(?,?,?,?) '
                    'ON CONFLICT(task_id,attempt_no) DO UPDATE SET token_hash=excluded.token_hash,'
                    'expires_at=excluded.expires_at',
-                   (key.task_id,key.attempt_no,_token_hash(token),store.clock()+GRANT_SECONDS))
-        return _view(row,grant=token,expires_at=store.clock()+GRANT_SECONDS)
+                   (key.task_id, key.attempt_no, _token_hash(token), expires_at))
+        return _view(row, grant=token, expires_at=expires_at)
+
+
+def _read_authorized(db, ctx, key, grant, now):
+    if grant is None:
+        control.require_leader(db, ctx, control.context_leader(db))
+        return True
+    ctx.require_leader()
+    group = _group(db)
+    if group is None or not control.matches_component(ctx, group['leader_manifest']):
+        return False
+    ctx.own_binding()
+    permission = db.execute('SELECT token_hash,expires_at FROM read_grants WHERE task_id=? AND attempt_no=?',
+                            (key.task_id, key.attempt_no)).fetchone()
+    return (permission is not None and permission['expires_at'] > now
+            and _matches(grant, permission['token_hash']))
 
 
 def collect(ctx, key: AttemptKey, grant: str | None, *, wait_seconds=0):
-    """Read-only receipt collection. Expiry or timeout never changes writer ownership."""
-    if (isinstance(wait_seconds,bool) or not isinstance(wait_seconds,(int,float))
-            or not math.isfinite(wait_seconds) or not 0 <= wait_seconds <= 60):
+    """Collect one receipt under exact grant or Leader authority without changing state."""
+    _validate_key(key)
+    if (type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 60
+            or not math.isfinite(wait_seconds)):
         raise BridgeError('INVALID_WAIT')
-    deadline = time.monotonic()+wait_seconds
+    deadline = time.monotonic() + wait_seconds
     store = Store(ctx.paths)
     snapshot = store.read
     while True:
         with snapshot() as db:
-            if db is None:
-                return _view(ok=False,reason='ATTEMPT_NOT_FOUND')
-            row = _attempt(db,key)
+            try:
+                authorized = db is not None and _read_authorized(db, ctx, key, grant, store.clock())
+            except (OSError, ValueError):
+                authorized = False
+            if not authorized:
+                return _view(ok=False, reason='INVALID_READ_GRANT' if grant is not None else 'STALE_LEADER')
+            row = _attempt(db, key)
             if row is None:
-                return _view(ok=False,reason='ATTEMPT_NOT_FOUND')
+                return _view(ok=False, reason='ATTEMPT_NOT_FOUND')
             if row['cleaned_at'] is not None:
                 return _view(row)
-            if grant is None:
-                control.require_leader(db,ctx,control.context_leader(db))
-            else:
-                permission = db.execute('SELECT * FROM read_grants WHERE task_id=? AND attempt_no=?',
-                                        (key.task_id,key.attempt_no)).fetchone()
-                if (permission is None or permission['expires_at'] <= store.clock()
-                        or not _matches(grant,permission['token_hash'])):
-                    return _view(row,ok=False,reason='INVALID_READ_GRANT')
             if row['result_id'] is not None:
-                payload = read_file(ctx.paths,key,'result',row['result_sha256'])
-                return _view(row,result=payload.decode('utf-8'),result_size=len(payload),
-                             result_path=str(ctx.paths.data/key.task_id/
-                                             ('attempt-'+str(key.attempt_no))/'result.md'))
+                payload = _read_result(ctx.paths, row)
+                return _view(row, result=payload.decode('utf-8'), result_size=len(payload),
+                             result_path=str(_result_path(ctx.paths, key)))
             view = _view(row)
-        if time.monotonic() >= deadline or row['state'] in TERMINAL:
+        if time.monotonic() >= deadline or row['state'] in TERMINAL | {'REVOKED'}:
             return view
         snapshot = store.poll_read
         time.sleep(min(_IDLE_INTERVAL, max(0, deadline - time.monotonic())))
 
 
-def ack(ctx, expected, key: AttemptKey, result_id):
-    with control._guard(ctx,terminal=True) as (store,db,leader,worker):
-        control.require_leader(db,ctx,expected)
-        row = _attempt(db,key)
+def ack(ctx, expected, key: AttemptKey, result_id, evidence):
+    _validate_key(key)
+    with control.operation_guard(ctx, terminal=True) as (store, db, _, _):
+        _, row = _leader_attempt(db, ctx, expected, key)
         if row is not None and row['cleaned_at'] is not None:
             return _view(row)
         if row is None or row['state'] not in TERMINAL or row['result_id'] != result_id or not result_id:
-            return _view(row,ok=False,reason='RECEIPT_MISMATCH')
-        payload = read_file(ctx.paths,key,'result',row['result_sha256'])
-        if len(payload) != row['result_size']:
-            raise BridgeError('RESULT_CONFLICT')
-        if row['ack_at'] is None:
-            _set(db,key,ack_at=store.clock())
-        return _view(_attempt(db,key),acknowledged=True)
+            return _view(row, ok=False, reason='RECEIPT_MISMATCH')
+        _read_result(ctx.paths, row)
+        if not _scope_evidence(key, row, evidence):
+            return _view(row, ok=False, reason='SCOPE_EVIDENCE_REQUIRED')
+        encoded = _json(evidence)
+        if row['ack_at'] is not None:
+            if row['ack_evidence'] != encoded:
+                raise BridgeError('ACK_CONFLICT')
+        else:
+            if row['closed_at'] is not None:
+                return _view(row, ok=False, reason='STALE_ATTEMPT')
+            _set(db, key, ack_at=store.clock(), ack_evidence=encoded)
+            scopes.release(db, _holder(row), access='write')
+        return _view(_attempt(db, key), acknowledged=True)
 
 
 def cleanup(ctx, expected, task_id):
-    """Explicitly remove only a closed task's transport files after durable revocation."""
-    validate_relative_path(task_id)
-    if '/' in task_id:
-        raise BridgeError('INVALID_ATTEMPT')
-    with control._guard(ctx,terminal=True) as (store,db,leader,worker):
-        control.require_leader(db,ctx,expected)
+    """Commit a tombstone before removing the transport for a closed task."""
+    _validate_task_id(task_id)
+    with control.operation_guard(ctx, terminal=True) as (store, db, _, _):
+        control.require_leader(db, ctx, expected)
         task = db.execute('SELECT t.*,r.closed_at FROM tasks t JOIN rounds r ON r.id=t.round_id '
-                          'WHERE t.id=?',(task_id,)).fetchone()
+                          'WHERE t.id=?', (task_id,)).fetchone()
         if task is None:
-            return _view(ok=False,state='REJECTED',reason='TASK_NOT_FOUND')
-        rows = db.execute('SELECT * FROM attempts WHERE task_id=? ORDER BY attempt_no',(task_id,)).fetchall()
+            return _view(ok=False, reason='TASK_NOT_FOUND')
+        rows = db.execute('SELECT * FROM attempts WHERE task_id=? ORDER BY attempt_no', (task_id,)).fetchall()
         if task['closed_at'] is None or any(
                 row['state'] not in TERMINAL | {'REVOKED'}
                 or (row['started_at'] is not None and row['ack_at'] is None) for row in rows):
-            return _view(ok=False,state='REJECTED',reason='REVIEW_REQUIRED',task_id=task_id)
+            return _view(ok=False, reason='REVIEW_REQUIRED', task_id=task_id)
         if task['cleaned_at'] is None:
-            db.execute('UPDATE tasks SET cleaned_at=? WHERE id=?',(store.clock(),task_id))
-        db.execute('DELETE FROM read_grants WHERE task_id=?',(task_id,))
-        keys = [AttemptKey(task_id,row['attempt_no']) for row in rows]
-    # The tombstone is committed first. Readers cannot return content even if a
-    # crash leaves some files behind, and retry uses the same exact owned keys.
-    with control._guard(ctx,terminal=True) as (_,db,_,_):
-        control.require_leader(db,ctx,expected)
-        cleanup_task(ctx.paths,task_id,keys)
-    return _view(state='CLEANED',task_id=task_id)
+            db.execute('UPDATE tasks SET cleaned_at=? WHERE id=?', (store.clock(), task_id))
+        db.execute('DELETE FROM read_grants WHERE task_id=?', (task_id,))
+        keys = [_key(row) for row in rows]
+    with control.operation_guard(ctx, terminal=True) as (_, db, _, _):
+        control.require_leader(db, ctx, expected)
+        cleanup_task(ctx.paths, task_id, keys)
+    return _view(state='CLEANED', task_id=task_id)

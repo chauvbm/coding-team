@@ -53,7 +53,7 @@ Use [`scripts/coding_team.py`](scripts/coding_team.py) for the seven commands: `
 
 ## Roles and delegation
 
-If this installation offers an [external Desktop worker](references/control-policy.md#external-workers), handle its direct user controls with the installed `command` entry from the worktree. Check active Leader, native policy, opt-in, pairing and delivery readiness before assigning work. Open a coordination round before dispatch, and keep it open while reviewing a worker result. Follow the platform guide for the native representative, repeated corrections and recovery.
+For [external Desktop workers](references/control-policy.md#external-workers), handle direct controls with the installed `command` entry from the worktree. Check Leader authority, policy, opt-in and the selected chat's readiness. Choose the role and work item before choosing a native or Desktop executor. Open a round before dispatch, reserve its file scope, and keep the round open through review. Follow the installed platform guide for listeners, receipt collection, corrections and recovery.
 
 For direct `/coding-team status`, `/coding-team help` or `/coding-team listen`, check the [external worker routing](references/control-policy.md#external-workers) before responding. If this chat is the Desktop worker, follow its installed worker skill for these commands. Handle native policy changes with the native command entry.
 
@@ -68,7 +68,7 @@ For direct `/coding-team status`, `/coding-team help` or `/coding-team listen`, 
 
 Before dispatch, read [agent contracts](references/agent-contracts.md), [model routing](references/model-routing.md) and [numeric defaults](references/governance-defaults.json). Tiers: default tiers come from the installed `platforms/<platform>.json`; Leader may raise or lower them. Guarantees: report ENFORCED/ADVISORY honestly; never present ADVISORY as a guarantee.
 
-**No nested delegation**: workers never dispatch, spawn or define agents, and never start another agent or AI CLI through a shell. Capacity is `max_subagents` excluding Leader, limited by runtime and user limits; start small when capacity is unknown. Rejected spawns do not count as participation. Give each file one writer; keep first reviews independent and route findings through Leader. Do not change global settings or relax permissions to obtain agents.
+**No nested delegation.** Workers never dispatch, spawn or define agents, including through a shell. Use `max_subagents` for native runtime capacity, excluding Leader. The Leader chooses how many ready Desktop chats to use according to independent work, actual capacity and user limits. Rejected assignments do not count as participation. Give each file one writer, keep first reviews independent and route findings through Leader.
 
 ## Gates and disagreement
 

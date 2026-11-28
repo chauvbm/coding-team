@@ -144,7 +144,7 @@ class IntegrationInstallTests(unittest.TestCase):
         for scope in ('user', 'project'):
             manifest = self.paths('codex', scope)['skill_dir'] / ct_install.MANIFEST_NAME
             data = json.loads(manifest.read_bytes())
-            self.assertEqual(data['bridge_abi'], 1)
+            self.assertEqual(data['bridge_abi'], 2)
             self.assertEqual(data['component'], 'leader')
             self.assertEqual(data['state_path'], paths['state_file'].resolve().as_posix())
             self.assertEqual(data['install_lock'], paths['lock_file'].resolve().as_posix())

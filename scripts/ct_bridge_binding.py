@@ -20,12 +20,17 @@ from ct_platform import load_platform, target_paths
 from ct_storage import locked, reject_links
 
 MANIFEST_NAME = 'install-manifest.json'
-BRIDGE_ABI = 1
+BRIDGE_ABI = 2
 _SHA = re.compile(r'[0-9a-f]{64}', re.ASCII)
 _COMMON = {'SKILL.md', 'scripts/ct_bridge_binding.py', 'scripts/ct_bridge_files.py',
            'scripts/ct_bridge_store.py', 'scripts/ct_platform.py', 'scripts/ct_storage.py',
            'scripts/ct_policy.py', 'scripts/ct_bridge_control.py',
-           'scripts/ct_bridge_attempts.py', 'scripts/ct_bridge_install.py'}
+           'scripts/ct_bridge_attempts.py', 'scripts/ct_bridge_install.py',
+           'scripts/ct_bridge_roles.py', 'scripts/ct_bridge_scopes.py',
+           'scripts/ct_bridge_upgrade.py', 'scripts/ct_roles.py',
+           'agents/roles/roles.json', 'agents/roles/ct-architect.md', 'agents/roles/ct-researcher.md',
+           'agents/roles/ct-developer.md', 'agents/roles/ct-test-engineer.md',
+           'agents/roles/ct-reviewer.md', 'agents/roles/ct-security.md'}
 _REQUIRED = {'leader': _COMMON | {'scripts/coding_team.py', 'scripts/ct_bridge_cli.py',
                                  'platforms/codex.json'},
              'worker': _COMMON | {'scripts/ct_bridge_worker.py', 'platforms/antigravity.json'}}
@@ -256,6 +261,15 @@ class BridgeContext:
 
     def worker_binding(self, manifest_path: str | Path):
         return self._binding(manifest_path, 'worker')
+
+    def discover_worker(self):
+        """Select the installed worktree worker before falling back to user scope."""
+        for parent in (self.paths.root / '.agents/skills', self.home / '.gemini/config/skills'):
+            root = _canonical(parent / 'coding-team-desktop-worker')
+            manifest = root / MANIFEST_NAME
+            if root.exists():
+                return self.worker_binding(manifest)
+        return None
 
 
 def ctx_from_runtime(platform, workspace, env, *, component, source_root, home):

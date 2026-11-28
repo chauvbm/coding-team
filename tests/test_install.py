@@ -209,7 +209,7 @@ class InstallTests(unittest.TestCase):
             self.assertIsNone(plan.state_default)
             self.apply(plan)
             manifest = json.loads((expected / 'install-manifest.json').read_bytes())
-            self.assertEqual((manifest['bridge_abi'], manifest['component']), (1, 'worker'))
+            self.assertEqual((manifest['bridge_abi'], manifest['component']), (2, 'worker'))
             self.assertEqual((expected / 'SKILL.md').read_bytes(), b'worker fixture\n')
             ct_install.uninstall(self.cfg('antigravity'), scope=scope, env=self.env, home=self.home,
                                  project_dir=self.project, desktop_worker=True)

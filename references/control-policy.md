@@ -42,7 +42,7 @@ Controls never reset ledgers, extend budgets, approve plans or resume STOP_HOLD.
 
 ## External workers
 
-Codex on Windows supports a default-OFF [Antigravity Desktop connection](antigravity-desktop.md). The Leader runs `/coding-team agy on|off` and `/coding-team agy auto on|off` through the installed `command` entry from the active worktree. Inter-app commands take chat identity from the runtime. Native Leader policy OFF blocks new starts. Already-started work keeps its outcome and write ownership until reconciled.
+Codex on Windows supports a default-OFF [Antigravity Desktop connection](antigravity-desktop.md). The Leader runs `/coding-team agy on|off` and `/coding-team agy auto on|off` through the installed `command` entry from the active worktree. Inter-app commands take chat identity from the runtime. Each eligible Antigravity chat can join the same invitation and listen separately. Native Leader policy OFF blocks new starts. Already-started work keeps its outcome and write ownership until reconciled.
 
 In the Codex chat, run `command '/coding-team status'` and `command '/coding-team help'` to answer chat commands. Chat status includes an `inter_app` connection view. The machine `status` operation supplies the native eligibility check.
 

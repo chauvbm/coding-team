@@ -37,26 +37,136 @@ class AttemptTests(unittest.TestCase):
         self.worker = fixture.context(worker_skill, 'worker',
                                       {'ANTIGRAVITY_CONVERSATION_ID': 'worker-chat'})
         self.binding = binding
+        self.fixture = fixture
+        self.worker_skill = worker_skill
         self.store = Store(self.leader.paths)
         self.policy = self.leader.own_binding().policy_path
         ct_policy.initialize_state(self.policy)
         ct_policy.initialize_policy_epochs(self.policy)
         self.expected = binding.LeaderRef(self.leader.actor, 1)
         self.round_id = 'R-attempt-fixture'
+        subprocess.run(['git', '-C', str(fixture.workspace), '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'baseline'],
+                       check=True, capture_output=True)
+        self.head = subprocess.check_output(['git', '-C', str(fixture.workspace), 'rev-parse', 'HEAD'],
+                                            text=True).strip()
         with self.store.write() as db:
             db.execute('UPDATE group_state SET leader_platform=?,leader_chat=?,leader_manifest=?, '
-                       'leader_epoch=1,desktop_enabled=1,desktop_epoch=1,auto_enabled=0,auto_epoch=1, '
-                       'pair_epoch=1,worker_platform=?,worker_chat=?,worker_manifest=? WHERE id=1',
-                       ('codex', 'leader-chat', self.leader_manifest.as_posix(), 'antigravity',
-                        'worker-chat', self.worker_manifest.as_posix()))
+                       'leader_epoch=1 WHERE id=1', ('codex', 'leader-chat', self.leader_manifest.as_posix()))
+            db.execute("INSERT INTO peers(platform,enabled,desktop_epoch,auto_epoch) VALUES ('antigravity',1,1,1)")
+            db.execute("INSERT INTO workers(worker_id,platform,chat_id,manifest,leader_epoch,registered_at) "
+                       "VALUES ('worker-1','antigravity','worker-chat',?,1,?)", (self.worker_manifest.as_posix(), time.time()))
             db.execute('INSERT INTO rounds(id,leader_epoch,leader_platform,leader_chat,'
                        'leader_manifest,opened_at) VALUES(?,1,?,?,?,?)',
                        (self.round_id,'codex','leader-chat',self.leader_manifest.as_posix(),time.time()))
 
     def request(self, publish_id='publication-1', mode='manual', task_id=None):
-        return attempts.Request(publish_id=publish_id, content=b'Exact request\n', kind='EDIT',
-                                mode=mode, scope=('source.txt',), baseline={'source.txt': None},
-                                task_id=task_id)
+        return self.role_request(publish_id, mode=mode, task_id=task_id)
+
+    def add_worker(self, number):
+        worker_id, chat = f'worker-{number}', f'worker-chat-{number}'
+        with self.store.write() as db:
+            db.execute("INSERT INTO workers(worker_id,platform,chat_id,manifest,leader_epoch,registered_at) "
+                       "VALUES (?,'antigravity',?,?,1,?)", (worker_id, chat, self.worker_manifest.as_posix(), time.time()))
+        return self.fixture.context(self.worker_skill, 'worker', {'ANTIGRAVITY_CONVERSATION_ID': chat})
+
+    def role_request(self, publish_id, worker_id='worker-1', *, mode='manual',
+                     item='item-1', path='source.txt', variant='ct-developer', task_id=None):
+        edit = variant == 'ct-developer'
+        return attempts.Request(
+            publish_id=publish_id, mode=mode, worker_id=worker_id,
+            assignment={'variant': variant, 'work_item_id': item, 'depends_on': {},
+                        'snapshot': {'head': self.head, 'inputs': {}}, 'read_paths': [],
+                        'write_paths': [path] if edit else [],
+                        'check_outputs': [], 'test_paths': []},
+            baseline={path: 'ABSENT'} if edit else {}, content=b'Exact request\n', task_id=task_id)
+
+    def offer(self, *args, **kwargs):
+        return attempts.publish(self.leader, self.expected, self.round_id,
+                                self.role_request(*args, **kwargs))
+
+    def test_role_assignment_is_authoritative_at_begin(self):
+        offer = self.offer('assigned')
+        self.assertEqual((offer['worker_id'], offer['role'], offer['work_item_id']),
+                         ('worker-1', 'ct-developer', 'item-1'))
+        started = attempts.begin(self.worker, self.key(offer), None)
+        self.assertEqual((started['worker_id'], started['role'], started['work_item_id']),
+                         ('worker-1', 'ct-developer', 'item-1'))
+
+    def test_two_work_items_cannot_both_reserve_one_worker(self):
+        barrier = threading.Barrier(2)
+
+        def reserve(index):
+            barrier.wait(timeout=5)
+            return self.offer(f'race-{index}', item=f'item-{index}', path=f'source-{index}.txt')
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            offers = list(pool.map(reserve, (1, 2)))
+        self.assertEqual(sum(offer['ok'] for offer in offers), 1)
+
+    def test_one_work_item_owner_across_disjoint_desktop_and_native_dispatches(self):
+        import ct_bridge_control as control
+
+        self.add_worker(2)
+        self.add_worker(3)
+        self.add_worker(4)
+
+        def race(left, right):
+            ready = threading.Barrier(2)
+
+            def run(operation):
+                ready.wait(timeout=10)
+                return operation()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = list(pool.map(run, (left, right)))
+            self.assertEqual(sum(value['ok'] for value in outcomes), 1, outcomes)
+            loser = next(value for value in outcomes if not value['ok'])
+            self.assertEqual(loser['reason'], 'WORK_ITEM_OWNED', outcomes)
+
+        race(lambda: self.offer('one-a', item='same-read', variant='ct-researcher'),
+             lambda: self.offer('one-b', 'worker-2', item='same-read', variant='ct-researcher'))
+        native_assignment = self.role_request('native', item='mixed-read', variant='ct-researcher').assignment
+        race(lambda: control.register_native(self.leader, self.expected, self.round_id, 'native', native_assignment),
+             lambda: self.offer('two-b', 'worker-3', item='mixed-read', variant='ct-researcher'))
+        spare = self.offer('spare', 'worker-4', item='distinct-read', variant='ct-researcher')
+        self.assertTrue(spare['ok'], spare)
+        with self.store.read() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM work_items').fetchone()[0], 3)
+            self.assertEqual(db.execute('SELECT count(*) FROM participants').fetchone()[0], 3)
+
+    def test_partial_publish_holds_reservation_and_other_workers_progress(self):
+        second = self.add_worker(2)
+        with patch.object(attempts, 'publish_file', side_effect=RuntimeError('publish interrupted')):
+            with self.assertRaisesRegex(RuntimeError, 'publish interrupted'):
+                self.offer('interrupted')
+        self.assertFalse(self.offer('same-worker', item='item-2', path='other.txt')['ok'])
+        self.assertFalse(self.offer('same-scope', 'worker-2', item='item-3')['ok'])
+        independent = self.offer('independent', 'worker-2', item='item-4', path='other.txt')
+        self.assertTrue(attempts.begin(second, self.key(independent), None)['ok'])
+        self.assertEqual(self.offer('interrupted')['state'], 'WAITING_FOR_USER')
+
+    def test_terminal_writer_can_rearm_before_ack_while_scope_is_held(self):
+        import ct_bridge_control as control
+
+        self.add_worker(2)
+        key = self.key(self.publish())
+        begin = attempts.begin(self.worker, key, None)
+        attempts.finish(self.worker, key, begin['execution_ticket'], 'COMPLETED', b'Ready for review')
+        self.enable_auto()
+        status = control.worker_status(self.worker)
+        self.assertEqual(status['reason'], 'WAITER_NOT_READY')
+        self.assertTrue(status['connections'][0]['workers'][0]['review_pending'])
+        pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(self.stop_listener, pool)
+        waiter = pool.submit(attempts.listen, self.worker)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not control.worker_status(self.worker)['ready']:
+            self.assertFalse(waiter.done())
+            time.sleep(.05)
+        self.assertTrue(control.worker_status(self.worker)['ready'])
+        conflict = self.offer('before-ack', 'worker-2', item='other')
+        self.assertEqual(conflict['reason'], 'SCOPE_CONFLICT')
 
     def publish(self, **kwargs):
         return attempts.publish(self.leader, self.expected, self.round_id, self.request(**kwargs))
@@ -70,13 +180,21 @@ class AttemptTests(unittest.TestCase):
             return dict(db.execute('SELECT * FROM attempts WHERE task_id=? AND attempt_no=?',
                                    (key.task_id, key.attempt_no)).fetchone())
 
+    def evidence(self, key, **extra):
+        return {'task_id': key.task_id, 'attempt_no': key.attempt_no,
+                'snapshot': {'head': self.head, 'inputs': {}},
+                'summary': 'Verified scoped result', 'scope_verified': True, **extra}
+
+    def ack(self, key, result_id):
+        return attempts.ack(self.leader, self.expected, key, result_id, self.evidence(key))
+
     def enable_auto(self):
         with self.store.write() as db:
-            db.execute('UPDATE group_state SET auto_enabled=1, auto_epoch=auto_epoch+1')
+            db.execute('UPDATE peers SET auto_enabled=1, auto_epoch=auto_epoch+1')
 
     def stop_listener(self, pool):
         with self.store.write() as db:
-            db.execute('UPDATE group_state SET auto_enabled=0,auto_epoch=auto_epoch+1')
+            db.execute('UPDATE peers SET auto_enabled=0,auto_epoch=auto_epoch+1')
         pool.shutdown(wait=True)
 
     def listen_and_publish(self, publish_id='auto-publication'):
@@ -102,10 +220,10 @@ class AttemptTests(unittest.TestCase):
         stamp = json.dumps(asdict(ct_policy.policy_stamp(self.policy,'leader-chat',require_epochs=True)),
                            sort_keys=True,separators=(',',':'))
         with self.store.write() as db:
-            group = db.execute('SELECT * FROM group_state').fetchone()
-            db.execute('INSERT INTO waiter(id,nonce,leader_epoch,pair_epoch,auto_epoch,desktop_epoch,'
-                       'policy_stamp,expires_at) VALUES(1,?,1,1,?,1,?,?)',
-                       ('old-helper',group['auto_epoch'],stamp,time.time()+60))
+            epoch = db.execute('SELECT auto_epoch FROM peers').fetchone()[0]
+            db.execute('INSERT INTO waiter(worker_id,nonce_hash,leader_epoch,auto_epoch,desktop_epoch,'
+                       "policy_stamp,expires_at) VALUES('worker-1',?,1,?,1,?,?)",
+                       ('old-helper', epoch, stamp, time.time()+60))
         key = self.key(self.publish(mode='auto'))
         with self.store.write() as db:
             db.execute('DELETE FROM waiter')
@@ -123,7 +241,8 @@ class AttemptTests(unittest.TestCase):
         begun = attempts.begin(self.worker,key,None)
         attempts.finish(self.worker,key,begun['execution_ticket'],'OUTCOME_UNKNOWN',b'Connection lost')
         wrong = replace(self.worker,actor=self.binding.Actor('antigravity','wrong-chat'))
-        self.assertFalse(attempts.resume(wrong,key,begun['execution_ticket'])['ok'])
+        with self.assertRaisesRegex(ValueError, 'WRONG_WORKER'):
+            attempts.resume(wrong,key,begun['execution_ticket'])
         real = attempts.publish_file
         def interrupted(*args,**kwargs):
             real(*args,**kwargs)
@@ -146,45 +265,55 @@ class AttemptTests(unittest.TestCase):
         with patch.object(attempts,'publish_file',side_effect=interrupted):
             with self.assertRaises(RuntimeError):
                 attempts.finish(self.worker,key,begun['execution_ticket'],'COMPLETED',b'verified final')
-        evidence = {'task_id':key.task_id,'attempt_no':key.attempt_no,'confirmed_by':'user',
-                    'stopped':True,'summary':'Worker stopped; final file and scope diff verified.',
-                    'state':'COMPLETED','result_sha256':hashlib.sha256(b'verified final').hexdigest()}
+        evidence = self.evidence(key, confirmed_by='user', stopped=True, state='COMPLETED',
+                                 result_sha256=hashlib.sha256(b'verified final').hexdigest())
         recovered = attempts.reconcile(self.leader,self.expected,key,evidence)
         self.assertTrue(recovered['ok'],recovered)
         self.assertEqual(recovered['state'],'COMPLETED')
         replay = attempts.reconcile(self.leader,self.expected,key,evidence)
         self.assertEqual(recovered['result_id'],replay['result_id'])
-        self.assertTrue(attempts.ack(self.leader,self.expected,key,recovered['result_id'])['ok'])
+        self.assertTrue(self.ack(key, recovered['result_id'])['ok'])
 
-    def test_two_queued_targets_survive_healthy_rearm(self):
-        import ct_policy
+    def test_many_workers_claim_only_assigned_attempt_and_run_together(self):
+        for count in (1, 2, 3, 9):
+            with self.subTest(count=count):
+                self.run_worker_group(count)
+
+    def run_worker_group(self, count):
+        for number in range(getattr(self, 'registered_workers', 1) + 1, count + 1):
+            self.add_worker(number)
+        self.registered_workers = count
+        workers = [self.worker, *(self.fixture.context(self.worker_skill, 'worker',
+                    {'ANTIGRAVITY_CONVERSATION_ID': f'worker-chat-{n}'}) for n in range(2, count + 1))]
         self.enable_auto()
-        stamp = json.dumps(asdict(ct_policy.policy_stamp(self.policy,'leader-chat',require_epochs=True)),
-                           sort_keys=True,separators=(',',':'))
-        with self.store.write() as db:
-            epoch = db.execute('SELECT auto_epoch FROM group_state').fetchone()[0]
-            db.execute('INSERT INTO waiter(id,nonce,leader_epoch,pair_epoch,auto_epoch,desktop_epoch,'
-                       'policy_stamp,expires_at) VALUES(1,?,1,1,?,1,?,?)',
-                       ('healthy-helper',epoch,stamp,time.time()+60))
-        first = self.key(self.publish(publish_id='queue-first',mode='auto'))
-        second = self.key(self.publish(publish_id='queue-second',mode='auto'))
-        # A consumed registration is the handoff from a successful tool wake to
-        # the next helper in the same chat, as distinct from a lost heartbeat.
-        with self.store.write() as db:
-            db.execute('UPDATE waiter SET expires_at=0')
-        pool = ThreadPoolExecutor(max_workers=1)
-        self.addCleanup(self.stop_listener,pool)
-        pending = pool.submit(attempts.listen,self.worker)
-        deadline = time.monotonic()+10
-        while time.monotonic()<deadline and self.row(first)['state']=='QUEUED':
-            time.sleep(.05)
-        self.assertEqual(self.row(first)['state'],'CLAIMED')
-        claim = pending.result(timeout=5)
-        begun = attempts.begin(self.worker,first,claim['claim'])
-        attempts.finish(self.worker,first,begun['execution_ticket'],'COMPLETED',b'first done')
-        next_claim = pool.submit(attempts.listen,self.worker).result(timeout=10)
-        self.assertEqual(self.key(next_claim),second)
-        self.assertTrue(attempts.begin(self.worker,second,next_claim['claim'])['ok'])
+        pool = ThreadPoolExecutor(max_workers=count)
+        self.addCleanup(self.stop_listener, pool)
+        listeners = [pool.submit(attempts.listen, worker) for worker in workers]
+        deadline = time.monotonic() + 35
+        while time.monotonic() < deadline:
+            with self.store.read() as db:
+                if db.execute('SELECT count(*) FROM waiter').fetchone()[0] == count:
+                    break
+            time.sleep(.03)
+        else:
+            self.fail('listeners did not all register')
+        keys = []
+        for n in range(1, count + 1):
+            offer = self.offer(f'queue-{count}-{n}', f'worker-{n}', mode='auto',
+                               item=f'item-{count}-{n}', variant='ct-researcher')
+            self.assertTrue(offer['ok'], (count, n, offer))
+            keys.append(self.key(offer))
+        claims = [listener.result(timeout=35) for listener in listeners]
+        self.assertEqual([self.key(claim) for claim in claims], keys)
+        starts = [attempts.begin(worker, key, claim['claim']) for worker, key, claim in zip(workers, keys, claims)]
+        self.assertTrue(all(start['state'] == 'RUNNING' for start in starts), starts)
+        self.assertTrue(all(self.row(key)['state'] == 'RUNNING' for key in keys))
+        for worker, key, start in reversed(list(zip(workers, keys, starts))):
+            result = attempts.finish(worker, key, start['execution_ticket'], 'COMPLETED',
+                                     key.task_id.encode('ascii'))
+            self.assertEqual(attempts.collect(self.leader, key, None)['result'], key.task_id)
+            self.assertTrue(self.ack(key, result['result_id'])['ok'])
+        pool.shutdown()
 
     def test_idle_listener_does_not_reenter_admission_every_poll(self):
         from threading import Event
@@ -202,13 +331,13 @@ class AttemptTests(unittest.TestCase):
         pool = ThreadPoolExecutor(max_workers=1)
         self.addCleanup(self.stop_listener, pool)
         with patch.object(store_type, 'poll_read', observe_poll, create=True), patch.object(
-                control, '_guard', wraps=control._guard) as admission:
+                control, 'operation_guard', wraps=control.operation_guard) as admission:
             future = pool.submit(attempts.listen, self.worker)
             self.assertTrue(polled.wait(timeout=8), 'the idle waiter never reached its read-only polling path')
             time.sleep(.55)
             self.assertEqual(admission.call_count, 1)
             with self.store.write() as db:
-                db.execute('UPDATE group_state SET auto_enabled=0,auto_epoch=auto_epoch+1')
+                db.execute('UPDATE peers SET auto_enabled=0,auto_epoch=auto_epoch+1')
             self.assertEqual(future.result(timeout=8)['state'], 'STOPPED')
 
     def test_publish_manual_stays_manual_after_auto_on(self):
@@ -219,7 +348,7 @@ class AttemptTests(unittest.TestCase):
         begun = attempts.begin(self.worker, key, None)
         self.assertTrue(begun['ok'], begun)
         self.assertEqual(begun['request'], 'Exact request\n')
-        self.assertEqual(begun['scope'], ['source.txt'])
+        self.assertEqual(begun['assignment']['write_paths'], ['source.txt'])
         self.assertEqual(self.row(key)['mode'], 'manual')
         self.assertFalse(attempts.begin(self.worker, key, None)['ok'])
 
@@ -241,26 +370,24 @@ class AttemptTests(unittest.TestCase):
         self.assertEqual(self.publish()['attempt_no'], 1)
         with self.assertRaises(ValueError):
             attempts.publish(self.leader, self.expected, self.round_id,
-                             attempts.Request('publication-1', b'different'))
+                             replace(self.request(), content=b'different'))
 
     def test_two_distinct_attempts_contend_for_one_slot(self):
         key1 = self.key(self.publish())
-        key2 = self.key(self.publish(publish_id='publication-2'))
         gate = threading.Barrier(2)
         def start(key):
             gate.wait(timeout=5)
             return attempts.begin(self.worker, key, None)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            outcomes = list(pool.map(start, (key1, key2)))
+            outcomes = list(pool.map(start, (key1, key1)))
         self.assertEqual(sum(view['ok'] for view in outcomes), 1)
         winner = next(view for view in outcomes if view['ok'])
         winner_key = self.key(winner)
-        loser_key = key2 if winner_key == key1 else key1
         for state in ('NEEDS_USER', 'OUTCOME_UNKNOWN'):
             paused = attempts.finish(self.worker, winner_key, winner['execution_ticket'], state,
                                      b'Needs a response')
             self.assertEqual(paused['state'], state)
-            self.assertFalse(attempts.begin(self.worker, loser_key, None)['ok'])
+            self.assertFalse(self.offer('publication-2', item='second', path='other.txt')['ok'])
             resumed = attempts.resume(self.worker, winner_key, winner['execution_ticket'])
             self.assertEqual(resumed['state'], 'RUNNING')
 
@@ -280,9 +407,9 @@ class AttemptTests(unittest.TestCase):
         self.assertFalse(attempts.begin(self.worker, key, None)['ok'])
         self.assertTrue(attempts.reoffer(self.leader, self.expected, key, 'manual')['ok'])
         with self.store.write() as db:
-            db.execute('UPDATE group_state SET desktop_epoch=desktop_epoch+2')
+            db.execute('UPDATE peers SET desktop_epoch=desktop_epoch+2')
         self.assertFalse(attempts.begin(self.worker, key, None)['ok'])
-        fresh = self.key(self.publish(publish_id='fresh'))
+        fresh = self.key(self.offer('fresh', item='another'))
         self.assertTrue(attempts.begin(self.worker, fresh, None)['ok'])
 
     def test_listen_claim_is_once_and_auto_revocation_can_be_reoffered_manually(self):
@@ -290,7 +417,7 @@ class AttemptTests(unittest.TestCase):
         self.assertEqual(claim['state'], 'CLAIMED')
         self.assertNotEqual(self.row(key)['claim_hash'], claim['claim'])
         with self.store.write() as db:
-            db.execute('UPDATE group_state SET auto_enabled=0,auto_epoch=auto_epoch+1')
+            db.execute('UPDATE peers SET auto_enabled=0,auto_epoch=auto_epoch+1')
         self.assertFalse(attempts.begin(self.worker, key, claim['claim'])['ok'])
         self.assertTrue(attempts.reoffer(self.leader, self.expected, key, 'manual')['ok'])
         self.assertEqual(self.row(key)['mode'], 'manual')
@@ -302,7 +429,7 @@ class AttemptTests(unittest.TestCase):
         key = self.key(self.publish())
         begun = attempts.begin(self.worker, key, None)
         with self.store.write() as db:
-            db.execute('UPDATE group_state SET desktop_enabled=0,desktop_epoch=desktop_epoch+1')
+            db.execute('UPDATE peers SET enabled=0,desktop_epoch=desktop_epoch+1')
         result = b'Completed review data\n'
         finished = attempts.finish(self.worker, key, begun['execution_ticket'], 'COMPLETED', result)
         replay = attempts.finish(self.worker, key, begun['execution_ticket'], 'COMPLETED', result)
@@ -314,7 +441,8 @@ class AttemptTests(unittest.TestCase):
 
     def test_read_grant_is_bound_to_one_attempt_and_collect_is_read_only(self):
         key = self.key(self.publish())
-        other = self.key(self.publish(publish_id='other'))
+        self.add_worker(2)
+        other = self.key(self.offer('other','worker-2',item='other', path='other.txt'))
         begun = attempts.begin(self.worker, key, None)
         attempts.finish(self.worker,key,begun['execution_ticket'],'COMPLETED',b'data')
         grant = attempts.grant_read(self.leader,self.expected,key)['grant']
@@ -335,26 +463,25 @@ class AttemptTests(unittest.TestCase):
         begun = attempts.begin(self.worker,key,None)
         finished = attempts.finish(self.worker,key,begun['execution_ticket'],'COMPLETED',b'done')
         self.assertFalse(self.publish(publish_id='retry', task_id=key.task_id)['ok'])
-        self.assertFalse(attempts.ack(self.leader,self.expected,key,'wrong')['ok'])
-        self.assertTrue(attempts.ack(self.leader,self.expected,key,finished['result_id'])['ok'])
+        self.assertFalse(self.ack(key, 'wrong')['ok'])
+        self.assertTrue(self.ack(key, finished['result_id'])['ok'])
         following = self.publish(publish_id='retry', task_id=key.task_id)
         self.assertEqual(following['attempt_no'],2)
         result = publish_file(self.leader.paths,key,'result',b'done')
         (self.leader.paths.data / result.relative_path).write_bytes(b'tampered')
         with self.assertRaises(ValueError):
-            attempts.ack(self.leader,self.expected,key,finished['result_id'])
+            self.ack(key, finished['result_id'])
 
     def test_cancel_never_releases_started_writer_and_reconcile_requires_scoped_confirmation(self):
         key = self.key(self.publish())
         begun = attempts.begin(self.worker,key,None)
         self.assertFalse(attempts.cancel_pending(self.leader,self.expected,key)['ok'])
         self.assertFalse(attempts.reconcile(self.leader,self.expected,key,{'stopped':True})['ok'])
-        evidence = {'task_id':key.task_id,'attempt_no':key.attempt_no,'confirmed_by':'user',
-                    'stopped':True,'summary':'Worker stopped; scope diff reviewed.'}
+        evidence = self.evidence(key, confirmed_by='user', stopped=True)
         reconciled = attempts.reconcile(self.leader,self.expected,key,evidence)
         self.assertEqual(reconciled['state'],'CANCELED')
         self.assertFalse(attempts.resume(self.worker,key,begun['execution_ticket'])['ok'])
-        pending = self.key(self.publish(publish_id='pending'))
+        pending = self.key(self.offer('pending',item='pending'))
         self.assertEqual(attempts.cancel_pending(self.leader,self.expected,pending)['state'],'CANCELED')
         self.assertFalse(attempts.begin(self.worker,pending,None)['ok'])
 
@@ -366,7 +493,9 @@ class AttemptTests(unittest.TestCase):
         finished = attempts.finish(self.worker,key,begun['execution_ticket'],'COMPLETED',b'done')
         grant = attempts.grant_read(self.leader,self.expected,key)['grant']
         self.assertFalse(attempts.cleanup(self.leader,self.expected,key.task_id)['ok'])
-        attempts.ack(self.leader,self.expected,key,finished['result_id'])
+        self.ack(key, finished['result_id'])
+        self.assertTrue(control.complete_work_item(self.leader,self.expected,self.round_id,'item-1',
+            outcome='accepted',snapshot={'head':self.head,'inputs':{'source.txt':'ABSENT'}},evidence='Verified')['ok'])
         self.assertTrue(control.close_round(self.leader,self.expected,self.round_id,'Reviewed diff and tests')['ok'])
         innocent = self.leader.paths.root/'user.txt'
         innocent.write_bytes(b'keep staged data')

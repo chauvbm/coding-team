@@ -28,6 +28,39 @@ class BridgeStoreTests(unittest.TestCase):
             self.assertIsNone(connection)
         self.assertFalse(self.paths.data.exists())
 
+    def test_live_slot_is_per_worker_and_attempt_cannot_change_worker(self):
+        with self.store.write() as db:
+            db.execute("INSERT INTO peers(platform) VALUES ('antigravity')")
+            db.execute("INSERT INTO rounds(id,leader_epoch,leader_platform,leader_chat,"
+                       "leader_manifest,opened_at) VALUES ('round',1,'codex','leader','manifest',1)")
+            for worker, task in (('a', 'one'), ('b', 'two'), ('a', 'three')):
+                db.execute("INSERT OR IGNORE INTO workers(worker_id,platform,chat_id,manifest,"
+                           "leader_epoch,registered_at) VALUES (?,'antigravity',?,'worker',1,1)",
+                           (worker, worker))
+                db.execute("INSERT INTO participants(round_id,participant_id,executor,worker_id) "
+                           "VALUES ('round',?,'desktop',?)", (task, worker))
+                db.execute("INSERT INTO tasks(id,round_id,participant_id,worker_id) "
+                           "VALUES (?,'round',?,?)", (task, task, worker))
+
+            def reserve(task, worker):
+                db.execute("INSERT INTO attempts(task_id,attempt_no,worker_id,publish_id,state,mode,kind,"
+                           "request_sha256,request_size,scope,baseline,desktop_epoch,auto_epoch,leader_epoch,"
+                           "policy_stamp,created_at) VALUES (?,1,?,?,'PUBLISHING','manual','READ',"
+                           "'digest',0,'[]','{}',1,0,1,'policy',1)", (task, worker, task))
+
+            reserve('one', 'a')
+            reserve('two', 'b')
+            with self.assertRaises(sqlite3.IntegrityError):
+                reserve('three', 'a')
+            db.execute("UPDATE attempts SET state='COMPLETED' WHERE task_id='two'")
+            with self.assertRaises(sqlite3.IntegrityError):
+                reserve('three', 'b')
+            db.execute("UPDATE attempts SET state='REVOKED' WHERE task_id='one'")
+            reserve('three', 'a')
+        with self.store.read() as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+
     def test_schema_refuses_wrong_version_and_partial_db(self):
         from ct_bridge_files import BridgeError
 
@@ -37,9 +70,9 @@ class BridgeStoreTests(unittest.TestCase):
             connection.execute('PRAGMA user_version=7')
         with self.assertRaises(BridgeError):
             with self.store.read():
-                self.fail('A newer database version may not be interpreted as v1.')
+                self.fail('A newer database version may not be interpreted as the current schema.')
         with closing(sqlite3.connect(self.paths.db)) as connection:
-            connection.execute('PRAGMA user_version=1')
+            connection.execute('PRAGMA user_version=2')
             connection.execute('DROP TABLE waiter')
         with self.assertRaises(BridgeError):
             with self.store.read():

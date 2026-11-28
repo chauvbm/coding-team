@@ -44,13 +44,16 @@ class BindingTests(unittest.TestCase):
         else:
             skill = self.home / '.gemini/config/skills/coding-team-desktop-worker'
         scripts = ['ct_bridge_binding', 'ct_bridge_files', 'ct_bridge_store',
-                   'ct_platform', 'ct_storage', 'ct_bridge_install']
+                   'ct_platform', 'ct_storage', 'ct_bridge_install', 'ct_bridge_roles',
+                   'ct_bridge_scopes', 'ct_bridge_upgrade', 'ct_roles']
         scripts += ['coding_team', 'ct_bridge_cli', 'ct_bridge_control',
                     'ct_bridge_attempts', 'ct_policy'] if component == 'leader' else [
                         'ct_bridge_worker', 'ct_bridge_control', 'ct_bridge_attempts', 'ct_policy']
         files = {'SKILL.md': b'fixture skill\n'}
         files['scripts/ct_bridge_commands.py'] = (ROOT / 'scripts/ct_bridge_commands.py').read_bytes()
         files.update({f'scripts/{name}.py': f'# fixture {name}\n'.encode() for name in scripts})
+        files.update({f'agents/roles/{path.name}': path.read_bytes()
+                      for path in (ROOT / 'agents/roles').iterdir() if path.is_file()})
         for name in (platform,):
             files[f'platforms/{name}.json'] = (ROOT / f'platforms/{name}.json').read_bytes()
         for rel, payload in files.items():
@@ -59,7 +62,7 @@ class BindingTests(unittest.TestCase):
             target.write_bytes(payload)
         lock = (self.custom / 'coding-team/install.lock' if component == 'leader' else
                 self.home / '.gemini/antigravity/coding-team-desktop-worker/install.lock')
-        record = {'schema_version': 1, 'bridge_abi': 1, 'component': component,
+        record = {'schema_version': 1, 'bridge_abi': 2, 'component': component,
                   'platform': platform, 'scope': scope, 'installed_at': 'fixture',
                   'install_lock': lock.as_posix(),
                   'files': {'skill_dir': {rel: hashlib.sha256(payload).hexdigest()
@@ -242,8 +245,8 @@ class BindingTests(unittest.TestCase):
         self.rewrite(manifest, record)
         with self.assertRaises(ValueError):
             self.context(skill).own_binding()
-        record['bridge_abi'] = 1
-        manifest.write_text(json.dumps(record)[:-1] + ', "bridge_abi": 1}', encoding='utf-8')
+        record['bridge_abi'] = 2
+        manifest.write_text(json.dumps(record)[:-1] + ', "bridge_abi": 2}', encoding='utf-8')
         with self.assertRaises(ValueError):
             self.context(skill).own_binding()
 

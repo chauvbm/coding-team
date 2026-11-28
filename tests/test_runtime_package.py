@@ -93,7 +93,9 @@ class RuntimePackageTests(unittest.TestCase):
         required = {'scripts/ct_bridge_install.py', 'scripts/ct_bridge_binding.py',
                     'scripts/ct_bridge_store.py', 'scripts/ct_bridge_files.py',
                     'scripts/ct_bridge_control.py', 'scripts/ct_bridge_attempts.py',
-                    'scripts/ct_bridge_cli.py'}
+                    'scripts/ct_bridge_cli.py', 'scripts/ct_bridge_roles.py',
+                    'scripts/ct_bridge_scopes.py', 'scripts/ct_roles.py',
+                    'agents/roles/roles.json'}
         retired = {'scripts/ct_antigravity.py', 'scripts/ct_winjob.py', 'scripts/ct_external.py',
                    'scripts/ct_external_store.py', 'scripts/ct_external_workspace.py',
                    'references/antigravity-cli.md'}
@@ -126,7 +128,7 @@ class RuntimePackageTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     installed = json.loads(Path(json.loads(result.stdout)['manifest']).read_bytes())
                     if target == 'codex':
-                        self.assertEqual((installed['bridge_abi'], installed['component']), (1, 'leader'))
+                        self.assertEqual((installed['bridge_abi'], installed['component']), (2, 'leader'))
                         self.assertEqual(installed['state_path'],
                                          (home / '.codex/coding-team/state.json').as_posix())
                     if target == 'antigravity':
@@ -135,7 +137,7 @@ class RuntimePackageTests(unittest.TestCase):
                                                 capture_output=True, text=True, timeout=45)
                         self.assertEqual(worker.returncode, 0, worker.stdout + worker.stderr)
                         installed = json.loads(Path(json.loads(worker.stdout)['manifest']).read_bytes())
-                        self.assertEqual((installed['bridge_abi'], installed['component']), (1, 'worker'))
+                        self.assertEqual((installed['bridge_abi'], installed['component']), (2, 'worker'))
                 self.assertFalse((home / '.codex/coding-team/external').exists())
 
     def test_unknown_platform_rejected_before_output(self):

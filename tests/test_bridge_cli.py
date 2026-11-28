@@ -7,9 +7,9 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
+from dataclasses import dataclass
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
@@ -17,6 +17,131 @@ sys.path.insert(0, str(SCRIPTS))
 
 
 class BridgeCliTests(unittest.TestCase):
+    def test_wait_ready_uses_peer_join_scope_and_rejects_old_epoch(self):
+        import ct_bridge_cli as cli
+        import ct_bridge_control as control
+        from ct_bridge_binding import Actor
+        actor = Actor('codex', 'trusted-runtime')
+        ctx = SimpleNamespace(require_leader=lambda: actor)
+        args = SimpleNamespace(operation='wait-ready', platform='codex', workspace=SCRIPTS.parent,
+                               task_id=None, attempt=None, payload_stdin=True, wait_seconds=0)
+        payload = {'leader_epoch': 3, 'platform': 'antigravity', 'join_id': 'join-1',
+                   'desktop_epoch': 2, 'auto_epoch': 0}
+        def wait(ctx_arg, expected, *, platform, join_id, desktop_epoch, auto_epoch, wait_seconds):
+            self.assertIs(ctx_arg, ctx)
+            self.assertEqual(expected.actor, actor)
+            self.assertEqual(expected.epoch, 3)
+            self.assertEqual((platform, join_id, desktop_epoch, auto_epoch, wait_seconds),
+                             ('antigravity', 'join-1', 2, 0, 0))
+            return {'ok': True, 'state': 'WAITING', 'reason': 'NOT_PAIRED'}
+        with patch.object(cli, '_context', return_value=ctx), patch.object(control, 'wait_ready', wait):
+            view, code = cli.bridge_command(args, SCRIPTS.parent, {}, Path.home(),
+                                           io.BytesIO(json.dumps(payload).encode()))
+            self.assertEqual(code, 0, view)
+            for bad in (payload | {'pair_epoch': 1}, payload | {'desktop_epoch': True},
+                        payload | {'join_id': None}, payload | {'platform': 'codex'}):
+                view, code = cli.bridge_command(args, SCRIPTS.parent, {}, Path.home(),
+                                               io.BytesIO(json.dumps(bad).encode()))
+                self.assertEqual(code, 2, view)
+                self.assertEqual(view['reason'], 'INVALID_PAYLOAD')
+
+    def test_collect_without_native_slot_is_key_scoped(self):
+        import ct_bridge_cli as cli
+        import ct_bridge_attempts as attempts
+        seen = []
+        ctx = SimpleNamespace(own_binding=lambda: None)
+        def collect(ctx_arg, key, grant, *, wait_seconds):
+            seen.append((key.task_id, key.attempt_no, grant, wait_seconds))
+            return {'ok': True, 'state': 'RUNNING', 'reason': None, 'task_id': key.task_id}
+        args = SimpleNamespace(operation='collect', platform='codex', workspace=SCRIPTS.parent,
+                               task_id='task-A', attempt=2, payload_stdin=True, wait_seconds=0)
+        with patch.object(cli, '_context', return_value=ctx), patch.object(attempts, 'collect', collect):
+            view, code = cli.bridge_command(args, SCRIPTS.parent, {}, Path.home(), io.BytesIO(b'{}'))
+        self.assertEqual(code, 0, view)
+        self.assertEqual(view['task_id'], 'task-A')
+        self.assertEqual(seen, [('task-A', 2, None, 0)])
+
+    def test_manual_prompt_binds_which_tab_to_task(self):
+        import ct_bridge_cli as cli
+        from types import SimpleNamespace
+        ctx = SimpleNamespace(paths=SimpleNamespace(root=Path('C:/fixture'), data=Path('C:/fixture/.coding-team/bridge')))
+        args = SimpleNamespace(operation='publish', platform='codex', workspace=SCRIPTS.parent,
+                               task_id=None, attempt=None, payload_stdin=True, wait_seconds=0)
+        result = {'ok': True, 'state': 'WAITING_FOR_USER', 'reason': None, 'task_id': 'task-A',
+                  'attempt_no': 2, 'worker_id': 'worker-A', 'worker_label': 'Worker A'}
+        with patch.object(cli, '_context', return_value=ctx), patch.object(cli, '_mutate', return_value=result):
+            view, code = cli.bridge_command(args, SCRIPTS.parent, {}, Path.home(), io.BytesIO(b'{}'))
+        self.assertEqual(code, 0, view)
+        self.assertIn('worker-A', view['prompt'])
+        self.assertIn('Worker A', view['prompt'])
+        self.assertIn('task-A', view['prompt'])
+        self.assertIn('attempt 2', view['prompt'])
+
+    def test_structured_publication_preserves_assignment_without_derived_authority(self):
+        import ct_bridge_cli as cli
+
+        @dataclass
+        class Request:
+            publish_id: str
+            mode: str
+            worker_id: str
+            assignment: dict
+            baseline: dict
+            content: bytes
+            task_id: str | None = None
+            replaces_participant_id: str | None = None
+            transfer_evidence: dict | None = None
+
+        raw = {'publish_id': 'pub', 'mode': 'manual', 'worker_id': 'worker-key',
+               'assignment': {'variant': 'ct-reviewer', 'work_item_id': 'review'},
+               'baseline': {}, 'content': 'exact\nTiếng Việt\n'}
+        request = cli._request(raw, Request)
+        self.assertEqual(request.content, 'exact\nTiếng Việt\n'.encode())
+        self.assertEqual(request.assignment, {'variant': 'ct-reviewer', 'work_item_id': 'review'})
+        for field in ('actor', 'role', 'chat_id', 'leader_epoch', 'kind', 'scope', 'verified_model'):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'INVALID_REQUEST'):
+                cli._request(raw | {field: 'SECRET'}, Request)
+
+    def test_v2_internal_operations_are_registered(self):
+        import coding_team
+        for operation in ('reserve-leader', 'finish-leader', 'complete-work-item', 'ledger-evidence',
+                          'rollback-store'):
+            with self.subTest(operation=operation):
+                args = coding_team._parser().parse_args([
+                    'bridge', operation, '--platform', 'codex', '--workspace', str(SCRIPTS.parent),
+                    '--payload-stdin'])
+                self.assertEqual(args.operation, operation)
+
+    def test_worker_payload_cannot_supply_identity_role_or_epoch(self):
+        import ct_bridge_worker as worker
+        for operation, minimal in (('begin', {}), ('resume', {'execution_ticket': 'token'}),
+                                   ('finish', {'execution_ticket': 'token', 'state': 'COMPLETED', 'result': ''})):
+            args = SimpleNamespace(operation=operation, payload_file=None)
+            for field in ('actor', 'worker_id', 'chat_id', 'role', 'leader_epoch', 'verified_model'):
+                with self.subTest(operation=operation, field=field), self.assertRaises(ValueError):
+                    worker._payload(args, None, io.BytesIO(json.dumps(minimal | {field: 'SECRET'}).encode()))
+
+    def test_mutation_payload_rejects_unused_attempt_selectors_and_bad_epoch(self):
+        import ct_bridge_cli as cli
+        from ct_bridge_binding import Actor
+        ctx = SimpleNamespace(require_leader=lambda: Actor('codex', 'runtime-chat'))
+        for operation, payload in (
+                ('open-round', {}), ('close-round', {'round_id': 'round', 'evidence': 'done'}),
+                ('rollback-store', {}),
+                ('ledger-evidence', {'round_id': 'round', 'participant_id': 'participant',
+                                     'review_scope': [], 'snapshot': {}})):
+            for changes in ({'task_id': 'task'}, {'attempt': 1}):
+                args = SimpleNamespace(operation=operation, task_id=None, attempt=None, wait_seconds=0)
+                args.__dict__.update(changes)
+                with self.subTest(operation=operation, changes=changes), self.assertRaisesRegex(ValueError, 'INVALID_PAYLOAD'):
+                    cli._mutate(ctx, args, payload | {'leader_epoch': 1})
+
+    def test_strict_json_rejects_duplicates_constants_invalid_utf8_and_limit(self):
+        import ct_bridge_cli as cli
+        for raw in (b'{"leader_epoch":1,"leader_epoch":2}', b'{"x":NaN}', b'{"x":Infinity}',
+                    b'\xff', b'[]', b' ' * (cli._PAYLOAD_LIMIT + 1)):
+            with self.subTest(prefix=raw[:20]), self.assertRaisesRegex(ValueError, 'INVALID_PAYLOAD'):
+                cli._payload(io.BytesIO(raw), True)
     def test_control_parser_accepts_case_and_alias_for_all_bridge_commands(self):
         from ct_bridge_cli import parse_control
 
@@ -110,17 +235,9 @@ class BridgeCliTests(unittest.TestCase):
 class InstalledBridgeCliTests(unittest.TestCase):
     def setUp(self):
         from test_bridge_binding import BindingTests
-        from test_bridge_worker import remove_fixture
         self.fixture = BindingTests('runTest')
-        self.fixture.base = SCRIPTS.parent / ('.ct-cli-' + uuid.uuid4().hex)
-        self.fixture.base.mkdir()
-        self.addCleanup(remove_fixture, self.fixture.base)
-        self.fixture.home = self.fixture.base / 'home'
-        self.fixture.workspace = self.fixture.base / 'worktree'
-        self.fixture.workspace.mkdir()
-        subprocess.run(['git', 'init', '-q', str(self.fixture.workspace)], check=True, capture_output=True)
-        self.fixture.custom = self.fixture.home / 'custom-codex'
-        self.fixture.env = {'CODEX_HOME': str(self.fixture.custom), 'CODEX_THREAD_ID': 'leader-chat'}
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
         self.skill, _, _ = self.fixture.install()
 
     def policy(self, text=None, *, chat_id=None, env=None, state=None):
@@ -201,7 +318,7 @@ class InstalledBridgeCliTests(unittest.TestCase):
         import coding_team
         self.enable_policy()
         activated, _ = self.policy('/coding-team agy on')
-        payload = {name: activated[name] for name in ('leader_epoch', 'pair_epoch', 'desktop_epoch', 'auto_epoch')}
+        payload = {name: activated[name] for name in ('leader_epoch', 'platform', 'join_id', 'desktop_epoch', 'auto_epoch')}
         args = coding_team._parser().parse_args([
             'bridge', 'wait-ready', '--platform', 'codex', '--workspace', str(self.fixture.workspace),
             '--payload-stdin', '--wait-seconds', '0'])
@@ -212,7 +329,7 @@ class InstalledBridgeCliTests(unittest.TestCase):
         view, code = invoke(payload)
         self.assertEqual(code, 0, view)
         self.assertFalse(view.get('paired', False))
-        stale, code = invoke(payload | {'auto_epoch': 0})
+        stale, code = invoke(payload | {'auto_epoch': payload['auto_epoch'] + 1})
         self.assertEqual(code, 1, stale)
         self.assertEqual(stale['reason'], 'STALE_ACTIVATION')
         for changes in ({'task_id': 'task'}, {'attempt': 1}, {'wait_seconds': -1},
@@ -221,7 +338,7 @@ class InstalledBridgeCliTests(unittest.TestCase):
             self.assertEqual(code, 2, view)
             self.assertEqual(view['reason'], 'INVALID_PAYLOAD')
         for value in (payload | {'leader_epoch': True}, payload | {'auto_epoch': -1},
-                      payload | {'secret': 'SECRET'}, {k: v for k, v in payload.items() if k != 'pair_epoch'}):
+                      payload | {'secret': 'SECRET'}, {k: v for k, v in payload.items() if k != 'join_id'}):
             view, code = invoke(value)
             self.assertEqual(code, 2, view)
             self.assertEqual(view['reason'], 'INVALID_PAYLOAD')

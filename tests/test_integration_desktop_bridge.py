@@ -156,6 +156,39 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
             args += ['--task-id', key[0], '--attempt', key[1]]
         return self.invoke(self.worker_cli, args, payload=payload, chat=chat, worker=True, ok=ok)
 
+    def worker_id(self, chat='worker-chat'):
+        status = self.worker('connection-status', chat=chat)
+        workers = status.get('connections', [{}])[0].get('workers', [])
+        self.assertEqual(len(workers), 1, status)
+        self.assertEqual(status['role'], 'worker')
+        return workers[0]['worker_id']
+
+    def role_assignment(self, work_item_id, *, variant='ct-researcher', paths=('assigned.txt',),
+                        snapshot=None, write_paths=(), test_paths=()):
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.workspace, env=self.env,
+                              capture_output=True, check=True, timeout=20).stdout.decode().strip()
+        snapshot = snapshot or {'head': head,
+                                'inputs': {path: hashlib.sha256((self.workspace / path).read_bytes()).hexdigest()
+                                           for path in paths}}
+        return {'variant': variant, 'work_item_id': work_item_id, 'depends_on': {},
+                'snapshot': snapshot, 'read_paths': list(paths),
+                'write_paths': list(write_paths), 'check_outputs': [],
+                'test_paths': list(test_paths)}
+
+    def publish_assignment(self, round_id, worker_id, work_item_id, content, *, mode='manual',
+                           variant='ct-researcher', paths=('assigned.txt',), task_id=None):
+        request = {'publish_id': uuid.uuid4().hex, 'mode': mode, 'worker_id': worker_id,
+                   'assignment': self.role_assignment(work_item_id, variant=variant, paths=paths),
+                   'baseline': {}, 'content': content}
+        if task_id:
+            request['task_id'] = task_id
+        result = self.bridge('publish', {'leader_epoch': self.epoch, 'round_id': round_id,
+                                         'request': request})
+        self.assertEqual(result['worker_id'], worker_id)
+        self.assertEqual(result['work_item_id'], work_item_id)
+        self.assertEqual(result['role'], variant)
+        return result, (result['task_id'], result['attempt_no'])
+
     def native_cli(self):
         return self.home / '.gemini/config/skills/coding-team/scripts/coding_team.py'
 
@@ -188,20 +221,17 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         return self.bridge('open-round', {'leader_epoch': self.epoch})['round_id']
 
     def publish(self, round_id, content, *, mode='manual', task_id=None):
-        request = {'publish_id': uuid.uuid4().hex, 'content': content,
-                   'kind': 'READ', 'scope': ['assigned.txt'], 'baseline': {}, 'mode': mode}
-        if task_id:
-            request['task_id'] = task_id
-        view = self.bridge('publish', {'leader_epoch': self.epoch, 'round_id': round_id, 'request': request})
+        view, key = self.publish_assignment(round_id, self.worker_id(), 'fixture-work', content,
+                                            mode=mode, task_id=task_id)
         self.assertRegex(view['task_id'], r'^CT-[0-9a-f]{32}$')
-        return view, (view['task_id'], view['attempt_no'])
+        return view, key
 
     def attempt_path(self, key, name):
         return self.workspace / '.coding-team/bridge' / key[0] / ('attempt-' + str(key[1])) / name
 
-    def finish_attempt(self, key, begun, result):
+    def finish_attempt(self, key, begun, result, *, chat='worker-chat'):
         receipt = self.worker('finish', {'execution_ticket': begun['execution_ticket'],
-                                        'state': 'COMPLETED', 'result': result}, key=key)
+                                        'state': 'COMPLETED', 'result': result}, key=key, chat=chat)
         self.assertEqual(receipt['state'], 'COMPLETED')
         self.assertEqual(receipt['result_sha256'], hashlib.sha256(result.encode()).hexdigest())
         self.assertEqual(self.attempt_path(key, 'result.md').read_bytes(), result.encode())
@@ -211,8 +241,20 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         return receipt
 
     def ack(self, key, receipt):
-        self.assertTrue(self.bridge('ack', {'leader_epoch': self.epoch,
-                                          'result_id': receipt['result_id']}, key=key)['acknowledged'])
+        evidence = {'task_id': key[0], 'attempt_no': key[1], 'snapshot': receipt['snapshot'],
+                    'summary': 'Fixture output and scope verified.', 'scope_verified': True}
+        result = self.bridge('ack', {'leader_epoch': self.epoch, 'result_id': receipt['result_id'],
+                                     'evidence': evidence}, key=key)
+        self.assertTrue(result.get('acknowledged', result.get('ok')))
+
+    def complete_work_item(self, round_id, work_item_id, *, snapshot=None, outcome='accepted'):
+        assignment = self.role_assignment(work_item_id, snapshot=snapshot)
+        result = self.bridge('complete-work-item', {'leader_epoch': self.epoch, 'round_id': round_id,
+                     'work_item_id': work_item_id, 'outcome': outcome,
+                     'snapshot': assignment['snapshot'],
+                     'evidence': 'Fixture result verified against assigned scope.'})
+        self.assertTrue(result.get('ok'), result)
+        return result
 
     def close_round(self, round_id):
         self.assertEqual(self.bridge('close-round', {'leader_epoch': self.epoch, 'round_id': round_id,
@@ -245,7 +287,7 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         """The same activation moves from invitation to AUTO_READY only after its worker listens."""
         activated = self.control('/coding-team agy auto on')
         epochs = {name: activated[name] for name in
-                  ('leader_epoch', 'pair_epoch', 'desktop_epoch', 'auto_epoch')}
+                  ('leader_epoch', 'platform', 'join_id', 'desktop_epoch', 'auto_epoch')}
         before_join = self.wait_ready(epochs)
         self.assertEqual(before_join['state'], 'WAITING')
         self.assertFalse(before_join.get('paired', False))
@@ -283,6 +325,7 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         result = 'v1-style receipt fixture result.\n'
         receipt = self.finish_attempt(key, begun, result)
         self.ack(key, receipt)
+        self.complete_work_item(round_id, 'fixture-work')
         self.close_round(round_id)
         self.assertEqual(self.attempt_path(key, 'result.md').read_bytes(), result.encode())
         self.assertEqual(hashlib.sha256(self.attempt_path(key, 'result.md').read_bytes()).hexdigest(),
@@ -328,7 +371,7 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         begun = self.worker('begin', {}, key=key)
         self.assertEqual(begun['state'], 'RUNNING')
         self.assertEqual(begun['request'], request)
-        self.assertEqual(begun['scope'], ['assigned.txt'])
+        self.assertEqual(begun['assignment']['read_paths'], ['assigned.txt'])
         self.assertEqual(begun['baseline'], {})
         self.assertEqual(begun['kind'], 'READ')
         self.assertFalse(self.worker('begin', {}, key=key, ok=False)['ok'])
@@ -346,6 +389,7 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
                            'evidence': 'not yet reviewed'}, ok=False)
         self.assertEqual(busy['reason'], 'ROUND_BUSY')
         self.ack(key, receipt)
+        self.complete_work_item(round_id, 'fixture-work')
         self.close_round(round_id)
         self.assertEqual(self.git('status', '--porcelain'), b'')
 
@@ -360,7 +404,6 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
                 self.fail('listener exited before readiness: ' + str(status.get('reason')))
             status = self.worker('status')
             if status['waiter_ready']:
-                self.assertTrue(status['ready'])
                 return process
             time.sleep(.05)
         self.fail('listener did not become ready within 10 seconds')
@@ -416,6 +459,7 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         grant2 = self.bridge('grant-read', {'leader_epoch': self.epoch}, key=key2)['grant']
         self.assertFalse(self.bridge('collect', {'grant': grant2}, key=key1,
                                      chat='observer-chat', ok=False)['ok'])
+        self.complete_work_item(round_id, 'fixture-work')
         self.close_round(round_id)
         self.control('/coding-team agy auto off')
         self.assertEqual(self.git('status', '--porcelain'), b'')
@@ -448,6 +492,116 @@ class DesktopBridgeIntegrationTests(unittest.TestCase):
         self.assertFalse(status['auto_enabled'])
         self.assertFalse(status['paired'])
         self.assertFalse(self.control('/coding-team antigravity on', ok=False)['ok'])
+
+    def test_installed_peer_many_workers_concurrent_and_revision_affinity(self):
+        active = self.control('/coding-team agy auto on')
+        self.epoch = active['leader_epoch']
+        chats = [f'worker-{number}' for number in range(9)]
+        workers = [self.worker('join', chat=chat)['worker_id'] for chat in chats]
+        self.assertEqual(len(set(workers)), len(chats))
+        round_id = self.open_round()
+        listeners = [self.spawn(self.worker_cli, ['listen', '--workspace', self.workspace],
+                                chat=chat, worker=True) for chat in chats]
+        for listener in listeners:
+            self.addCleanup(self.stop_listener, listener)
+        deadline = time.monotonic() + 75
+        while time.monotonic() < deadline:
+            status = self.control('/coding-team status')['inter_app']['connections'][0]
+            if sum(worker['waiter_ready'] for worker in status['workers']) == len(chats):
+                break
+            self.assertTrue(all(listener.poll() is None for listener in listeners))
+            time.sleep(.10)
+        else:
+            self.fail('not all installed worker listeners reached readiness')
+        requests = [self.publish_assignment(round_id, worker, f'work-{number}', f'Check {number}\n', mode='auto')
+                    for number, worker in enumerate(workers)]
+        running = []
+        for chat, listener, (offer, key) in zip(chats, listeners, requests):
+            code, claimed = self.finish_process(listener, timeout=30)
+            self.assertEqual(code, 0, claimed)
+            self.assertEqual((claimed['worker_id'], claimed['task_id'], claimed['attempt_no']),
+                             (offer['worker_id'], *key))
+            begun = self.worker('begin', {'claim': claimed['claim']}, key=key, chat=chat)
+            self.assertEqual(begun['state'], 'RUNNING')
+            running.append((chat, key, begun))
+        observed = self.control('/coding-team status')['inter_app']['attempts']
+        self.assertEqual(sum(row['state'] == 'RUNNING' for row in observed), 9)
+        for chat, key, begun in reversed(running):
+            receipt = self.finish_attempt(key, begun, begun['request'], chat=chat)
+            self.ack(key, receipt)
+            if chat != chats[0]:
+                self.complete_work_item(round_id, begun['work_item_id'])
+        self.control('/coding-team agy auto off')
+        _, original, first = running[0]
+        _, second = self.publish_assignment(round_id, workers[0], first['work_item_id'], 'Correct the first result',
+                                             task_id=original[0])
+        self.assertEqual(second, (original[0], 2))
+        self.assertEqual(self.worker('begin', {}, key=second, chat=chats[1], ok=False)['reason'], 'WRONG_WORKER')
+        begun = self.worker('begin', {}, key=second, chat=chats[0])
+        self.ack(second, self.finish_attempt(second, begun, 'Corrected', chat=chats[0]))
+        self.complete_work_item(round_id, first['work_item_id'])
+        self.close_round(round_id)
+
+    def test_independent_review_uses_runtime_identity_and_exact_snapshot(self):
+        from test_task_ledger import LedgerTests, ledger
+
+        self.epoch = self.control('/coding-team agy on')['leader_epoch']
+        editor = self.worker('join')['worker_id']
+        reviewer = self.worker('join', chat='review-chat')['worker_id']
+        round_id = self.open_round()
+        write = self.role_assignment('write', variant='ct-developer', write_paths=('owned.txt',))
+        offer = self.bridge('publish', {'leader_epoch': self.epoch, 'round_id': round_id, 'request': {
+            'publish_id': 'edit', 'mode': 'manual', 'worker_id': editor, 'assignment': write,
+            'baseline': {'owned.txt': 'ABSENT'}, 'content': 'Create the owned file.'}})
+        key = offer['task_id'], offer['attempt_no']
+        begun = self.worker('begin', {}, key=key)
+        (self.workspace / 'owned.txt').write_bytes(b'owned result')
+        self.ack(key, self.finish_attempt(key, begun, 'Owned file created.'))
+        accepted = self.role_assignment('write', paths=('owned.txt',))['snapshot']
+        self.complete_work_item(round_id, 'write', snapshot=accepted)
+
+        def projection(participant, scope, snapshot, *, ok=True):
+            return self.bridge('ledger-evidence', {'leader_epoch': self.epoch, 'round_id': round_id,
+                'participant_id': participant, 'review_scope': scope, 'snapshot': snapshot}, ok=ok)
+
+        author = projection(offer['participant_id'], None, write['snapshot'])
+        self.assertIn(author['actor_id'], author['writer_ids'])
+        self.bridge('register-native', {'leader_epoch': self.epoch, 'round_id': round_id,
+                    'participant_id': 'observer', 'observer': True})
+        self.bridge('bind-native', {'leader_epoch': self.epoch, 'round_id': round_id,
+                    'participant_id': 'observer', 'handle': 'actual-observer-handle'})
+        self.assertEqual(projection('observer', ['owned.txt'], accepted, ok=False)['reason'], 'NO_EXECUTOR_EVIDENCE')
+        self.bridge('finish-native', {'leader_epoch': self.epoch, 'round_id': round_id,
+                    'participant_id': 'observer', 'evidence': 'Observation concluded'})
+
+        reviewer_ids = []
+        for label, chat, worker in (('self', 'worker-chat', editor), ('other', 'review-chat', reviewer)):
+            assignment = self.role_assignment(label, variant='ct-reviewer', paths=('owned.txt',), snapshot=accepted)
+            assignment['review_scope'] = ['owned.txt']
+            response = self.bridge('publish', {'leader_epoch': self.epoch, 'round_id': round_id, 'request': {
+                'publish_id': label, 'mode': 'manual', 'worker_id': worker, 'assignment': assignment,
+                'baseline': {}, 'content': 'Review the exact snapshot.'}})
+            key = response['task_id'], response['attempt_no']
+            begun = self.worker('begin', {}, key=key, chat=chat)
+            self.ack(key, self.finish_attempt(key, begun, 'Reviewed exact snapshot.', chat=chat))
+            result = projection(begun['participant_id'], ['owned.txt'], accepted)
+            self.assertEqual(projection(begun['participant_id'], ['owned.txt'], write['snapshot'],
+                                       ok=False)['reason'], 'INVALID_REVIEW_EVIDENCE')
+            reviewer_ids.append(result['actor_id'])
+            self.complete_work_item(round_id, label, snapshot=accepted)
+        self.assertEqual(reviewer_ids[0], author['actor_id'])
+        self.assertNotIn(reviewer_ids[1], author['writer_ids'])
+        fixture = LedgerTests('runTest')
+        fixture.root, fixture.path = self.workspace, self.base / 'ledger.json'
+        state = fixture.initial()
+        state.update(revision=0, audit=[], delivery_files=['owned.txt'])
+        ledger.event(state, 'init', 'installed bridge fixture')
+        state['baseline']['writers'] = author['writer_ids']
+        fixture.review(state, person=reviewer_ids[0])
+        self.assertEqual(fixture.fixture_readiness(state)['delivery'], 'HOLD')
+        fixture.review(state, person=reviewer_ids[1])
+        self.assertEqual(fixture.fixture_readiness(state)['delivery'], 'PASS')
+        self.close_round(round_id)
 
     def test_unknown_runtime_cannot_select_or_initialize_bridge(self):
         """Catches identity fallback to absent or fabricated inherited runtimes."""

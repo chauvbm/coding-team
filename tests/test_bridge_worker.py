@@ -4,9 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -20,25 +20,11 @@ except ImportError:
     worker = None
 
 
-def remove_fixture(path):
-    """Allow Windows file scanners to release a just-created Git directory."""
-    for retry in range(6):
-        try:
-            shutil.rmtree(path)
-            return
-        except OSError as exc:
-            if getattr(exc, 'winerror', None) != 32 or retry == 5:
-                raise
-            time.sleep(.1)
-
-
 class WorkerEntryTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(worker, 'worker entry implementation is missing')
         from test_bridge_binding import BindingTests
-        self.base = ROOT / ('.ct-worker-' + uuid.uuid4().hex)
-        self.base.mkdir()
-        self.addCleanup(remove_fixture, self.base)
+        self.base = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='ct-worker-'))).resolve()
         fixture = BindingTests('runTest')
         fixture.base = self.base
         fixture.home = self.base / "home Tiếng Việt's"
@@ -111,6 +97,34 @@ class WorkerEntryTests(unittest.TestCase):
         code, help_view = self.invoke('help', env={})
         self.assertEqual(code, 0, help_view)
         self.assertIn('/coding-team listen', json.dumps(help_view))
+
+    def test_slash_listen_is_per_actor_and_status_lists_all_workers(self):
+        import ct_bridge_control as control
+        self.leader()
+        self.assertTrue(control.configure_peer(self.leader_ctx, 'antigravity', 'auto_off')['ok'])
+        workers = {}
+        for label in ('A', 'B', 'C'):
+            env = {'ANTIGRAVITY_CONVERSATION_ID': 'runtime-chat-' + label}
+            code, joined = self.invoke('join', env=env)
+            self.assertEqual(code, 0, joined)
+            workers[label] = joined['worker_id']
+            repeated = self.invoke('join', env=env)[1]
+            self.assertEqual(repeated['worker_id'], workers[label])
+        self.assertEqual(len(set(workers.values())), 3)
+        status = control.connection_status(self.leader_ctx)
+        self.assertEqual({item['worker_id'] for item in status['connections'][0]['workers']}, set(workers.values()))
+        for secret in ('nonce', 'claim', 'execution_ticket', 'grant', 'runtime-chat-'):
+            self.assertNotIn(secret, json.dumps(status))
+
+    def test_manual_prompt_in_wrong_tab_cannot_begin(self):
+        ticket = self.leader()
+        self.invoke('connect', json.dumps({'ticket': ticket}).encode())
+        key_args = self.publish()
+        code, view = self.invoke('begin', b'{}', key_args,
+                                 env={'ANTIGRAVITY_CONVERSATION_ID': 'wrong-tab'})
+        self.assertEqual(code, 2, view)
+        self.assertFalse(view['ok'])
+        self.assertEqual(self.invoke('begin', b'{}', key_args)[1]['state'], 'RUNNING')
 
     def test_worker_connection_status_is_read_only_without_identity(self):
         code, view = self.invoke('connection-status', env={})
@@ -243,8 +257,18 @@ class WorkerEntryTests(unittest.TestCase):
         import ct_bridge_attempts as attempts
         import ct_bridge_control as control
         round_id = control.open_round(self.leader_ctx, self.expected)
+        joined = self.invoke('join')[1]
+        subprocess.run(['git', '-C', str(self.fixture.workspace), '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'baseline'],
+                       check=True, capture_output=True)
+        head = subprocess.check_output(['git', '-C', str(self.fixture.workspace), 'rev-parse', 'HEAD'],
+                                       text=True).strip()
+        assignment = {'variant': 'ct-reviewer', 'work_item_id': 'review-' + uuid.uuid4().hex,
+                      'snapshot': {'head': head, 'inputs': {}}, 'depends_on': {}, 'read_paths': [],
+                      'write_paths': [], 'check_outputs': [], 'test_paths': []}
         view = attempts.publish(self.leader_ctx, self.expected, round_id,
-                                attempts.Request(uuid.uuid4().hex, b'Inspect the assigned file\n', mode=mode))
+                                attempts.Request(uuid.uuid4().hex, mode, joined['worker_id'],
+                                                 assignment, {}, b'Inspect the assigned file\n'))
         self.assertTrue(view['ok'], view)
         return ('--task-id', view['task_id'], '--attempt', str(view['attempt_no']))
 

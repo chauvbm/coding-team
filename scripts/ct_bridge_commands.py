@@ -18,7 +18,7 @@ _FAMILY = re.compile(
 _HELP_LINES = (
     '/coding-team <app> on|off — in the Leader app, enable or pause agy, claude or codex',
     '/coding-team <app> auto on|off — in the Leader app, enable the target and choose automatic or manual delivery',
-    '/coding-team listen — in the worker app, join the invitation or resume the paired chat',
+    '/coding-team listen — join or resume this worker chat; use it in every participating chat',
     '/coding-team status — show this chat and worktree connection status',
     '/coding-team help — show commands, supported pairs, and an example',
 )
@@ -72,7 +72,7 @@ def help_view(platform: str, component: str) -> dict:
     example = '/coding-team status'
     if available:
         example = ('On Windows, send /coding-team agy auto on in Codex, then /coding-team listen '
-                   'in Antigravity on the same Git worktree.')
+                   'in each participating Antigravity chat on the same Git worktree.')
     return {
         'help': list(_HELP_LINES),
         'supported_pairs': list(_SUPPORTED_PAIRS),
