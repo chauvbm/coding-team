@@ -6,7 +6,7 @@ Routing is **ADVISORY** with checks. coding-team does not modify Superpowers and
 
 ## Routing table
 
-Before applying this legacy orchestrator-routing table, decide whether the task needs separate Spec and Plan artifacts or adopts an existing pair. If so, enter coding-team before drafting or presenting either artifact and follow [adaptive planning](adaptive-planning.md). A small task may remain direct work or a checklist. This guidance remains ADVISORY and preserves explicit user choice, eligibility, SOLO and established ownership.
+Before applying this legacy orchestrator-routing table, decide whether complex work needs a formal Spec or Plan, including adoption of an existing artifact. If so, enter coding-team before drafting or presenting it and follow [adaptive planning](adaptive-planning.md). A small task may remain direct work or a checklist. Routing is ADVISORY and preserves explicit user choice, eligibility, SOLO and established ownership.
 
 Apply top to bottom and stop at the first match. An explicit user choice of orchestrator always wins, unless safety policy forbids it.
 

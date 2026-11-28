@@ -6,7 +6,7 @@ A skill for proportionate delegation, coordinated implementation and independent
 
 This README is a guide for users, maintainers and reviewers. [SKILL.md](SKILL.md) is the operational entrypoint and its linked references define the workflow; the README adds no authority, approvals or competing rules. Licensed under [MIT](LICENSE).
 
-When a task needs separate Spec and Plan artifacts, use [adaptive planning](references/adaptive-planning.md): the Leader writes both, independent review is scoped to each artifact, and the reviewed Spec is approved before planning implementation. This process does not impose a fixed reviewer roster; runtime behavior remains platform-specific and instructions are ADVISORY.
+When complex work calls for a formal Spec or Plan, follow [adaptive planning](references/adaptive-planning.md). The Leader writes each artifact and selects at least two independent reviewers for it, including eligible Desktop workers when useful. Once reviewers agree on the current version, the Leader approves and continues within the authorized scope and architecture. A new scope expansion or major architectural change requires user approval. Small, clear work can use direct work or a checklist. Runtime enforcement is ADVISORY.
 
 ## Install
 
